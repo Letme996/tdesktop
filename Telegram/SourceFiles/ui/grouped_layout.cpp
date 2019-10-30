@@ -117,7 +117,7 @@ std::string Layouter::CountProportions(const std::vector<float64> &ratios) {
 		ratios
 	) | ranges::view::transform([](float64 ratio) {
 		return (ratio > 1.2) ? 'w' : (ratio < 0.8) ? 'n' : 'q';
-	}) | ranges::to_<std::string>();
+	}) | ranges::to<std::string>();
 }
 
 std::vector<GroupMediaLayout> Layouter::layout() const {
@@ -374,7 +374,7 @@ std::vector<GroupMediaLayout> Layouter::layoutFourTopAndOther() const {
 		},
 		{
 			QRect(w0 + _spacing + w1 + _spacing, h0 + _spacing, w2, h1),
-			RectPart::Right | RectPart::BottomLeft
+			RectPart::Right | RectPart::Bottom
 		},
 	};
 }

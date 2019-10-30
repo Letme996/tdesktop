@@ -9,17 +9,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/bytes.h"
 
+#include <QtNetwork/QNetworkReply>
+#include <QtNetwork/QNetworkAccessManager>
+
 namespace MTP {
 
 struct ServiceWebRequest {
-        ServiceWebRequest(not_null<QNetworkReply*> reply);
-        ServiceWebRequest(ServiceWebRequest &&other);
-        ServiceWebRequest &operator=(ServiceWebRequest &&other);
-        ~ServiceWebRequest();
+    ServiceWebRequest(not_null<QNetworkReply*> reply);
+    ServiceWebRequest(ServiceWebRequest &&other);
+    ServiceWebRequest &operator=(ServiceWebRequest &&other);
+    ~ServiceWebRequest();
 
-        void destroy();
+    void destroy();
 
-        QPointer<QNetworkReply> reply;
+    QPointer<QNetworkReply> reply;
 
 };
 
@@ -32,20 +35,35 @@ public:
 			int port,
 			bytes::const_span secret)> callback,
 		const QString &phone);
+	explicit SpecialConfigRequest(Fn<void()> timeDoneCallback);
 
 private:
 	enum class Type {
-		App,
-		Dns,
+		Mozilla,
+		Google,
+		RemoteConfig,
+		Realtime,
+		FireStore,
 	};
 	struct Attempt {
 		Type type;
-		QString domain;
+		QString data;
+		QString host;
 	};
+
+	SpecialConfigRequest(
+		Fn<void(
+			DcId dcId,
+			const std::string &ip,
+			int port,
+			bytes::const_span secret)> callback,
+		Fn<void()> timeDoneCallback,
+		const QString &phone);
 
 	void sendNextRequest();
 	void performRequest(const Attempt &attempt);
 	void requestFinished(Type type, not_null<QNetworkReply*> reply);
+	void handleHeaderUnixtime(not_null<QNetworkReply*> reply);
 	QByteArray finalizeRequest(not_null<QNetworkReply*> reply);
 	void handleResponse(const QByteArray &bytes);
 	bool decryptSimpleConfig(const QByteArray &bytes);
@@ -55,6 +73,7 @@ private:
 		const std::string &ip,
 		int port,
 		bytes::const_span secret)> _callback;
+	Fn<void()> _timeDoneCallback;
 	QString _phone;
 	MTPhelp_ConfigSimple _simpleConfig;
 
@@ -69,11 +88,20 @@ public:
 	DomainResolver(Fn<void(
 		const QString &domain,
 		const QStringList &ips,
-		TimeMs expireAt)> callback);
+		crl::time expireAt)> callback);
 
 	void resolve(const QString &domain);
 
 private:
+	enum class Type {
+		Mozilla,
+		Google,
+	};
+	struct Attempt {
+		Type type;
+		QString data;
+		QString host;
+	};
 	struct AttemptKey {
 		QString domain;
 		bool ipv6 = false;
@@ -89,13 +117,18 @@ private:
 	};
 	struct CacheEntry {
 		QStringList ips;
-		TimeMs expireAt = 0;
+		crl::time expireAt = 0;
+
+	};
+	struct Attempts {
+		std::vector<Attempt> list;
+		base::has_weak_ptr guard;
 
 	};
 
 	void resolve(const AttemptKey &key);
 	void sendNextRequest(const AttemptKey &key);
-	void performRequest(const AttemptKey &key, const QString &host);
+	void performRequest(const AttemptKey &key, const Attempt &attempt);
 	void checkExpireAndPushResult(const QString &domain);
 	void requestFinished(
 		const AttemptKey &key,
@@ -107,13 +140,13 @@ private:
 	Fn<void(
 		const QString &domain,
 		const QStringList &ips,
-		TimeMs expireAt)> _callback;
+		crl::time expireAt)> _callback;
 
 	QNetworkAccessManager _manager;
-	std::map<AttemptKey, std::vector<QString>> _attempts;
+	std::map<AttemptKey, Attempts> _attempts;
 	std::map<AttemptKey, std::vector<ServiceWebRequest>> _requests;
 	std::map<AttemptKey, CacheEntry> _cache;
-	TimeMs _lastTimestamp = 0;
+	crl::time _lastTimestamp = 0;
 
 };
 

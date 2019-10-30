@@ -10,34 +10,39 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_title.h"
 #include "ui/rp_widget.h"
 #include "base/timer.h"
+#include "base/object_ptr.h"
+
+#include <QtWidgets/QSystemTrayIcon>
 
 class BoxContent;
-class MediaView;
+
+namespace Main {
+class Account;
+} // namespace Main
 
 namespace Window {
 
 class Controller;
+class SessionController;
 class TitleWidget;
 struct TermsLock;
 
 QImage LoadLogo();
 QImage LoadLogoNoMargin();
-QIcon CreateIcon();
+QIcon CreateIcon(Main::Account *account = nullptr);
 void ConvertIconToBlack(QImage &image);
 
 class MainWindow : public Ui::RpWidget, protected base::Subscriber {
 	Q_OBJECT
 
 public:
-	MainWindow();
+	explicit MainWindow(not_null<Controller*> controller);
 
-	Window::Controller *controller() const {
-		return _controller.get();
+	Window::Controller &controller() const {
+		return *_controller;
 	}
-	void setInactivePress(bool inactive);
-	bool wasInactivePress() const {
-		return _wasInactivePress;
-	}
+	Main::Account &account() const;
+	Window::SessionController *sessionController() const;
 
 	bool hideNoQuit();
 
@@ -84,6 +89,10 @@ public:
 
 	rpl::producer<> leaveEvents() const;
 
+	virtual void updateWindowIcon();
+
+	void clearWidgets();
+
 public slots:
 	bool minimizeToTray();
 	void updateGlobalMenu() {
@@ -107,11 +116,8 @@ protected:
 	virtual void handleActiveChangedHook() {
 	}
 
-	void clearWidgets();
 	virtual void clearWidgetsHook() {
 	}
-
-	virtual void updateWindowIcon();
 
 	virtual void stateChangedHook(Qt::WindowState state) {
 	}
@@ -144,9 +150,11 @@ protected:
 	virtual int32 screenNameChecksum(const QString &name) const;
 
 	void setPositionInited();
+	void attachToTrayIcon(not_null<QSystemTrayIcon*> icon);
+	virtual void handleTrayIconActication(
+		QSystemTrayIcon::ActivationReason reason) = 0;
 
 private:
-	void checkAuthSession();
 	void updatePalette();
 	void updateUnreadCounter();
 	void initSize();
@@ -156,11 +164,15 @@ private:
 	void showTermsDecline();
 	void showTermsDelete();
 
+	int computeMinHeight() const;
+
+	not_null<Window::Controller*> _controller;
+
 	base::Timer _positionUpdatedTimer;
 	bool _positionInited = false;
 
-	std::unique_ptr<Window::Controller> _controller;
 	object_ptr<TitleWidget> _title = { nullptr };
+	object_ptr<Ui::RpWidget> _outdated;
 	object_ptr<TWidget> _body;
 	object_ptr<TWidget> _rightColumn = { nullptr };
 	QPointer<BoxContent> _termsBox;
@@ -171,8 +183,6 @@ private:
 
 	bool _isActive = false;
 	base::Timer _isActiveTimer;
-	bool _wasInactivePress = false;
-	base::Timer _inactivePressTimer;
 
 	base::Observable<void> _dragFinished;
 	rpl::event_stream<> _leaveEvents;

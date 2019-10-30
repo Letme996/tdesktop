@@ -115,6 +115,7 @@ Toggle {
 	vsize: pixels;
 	vshift: pixels;
 	stroke: pixels;
+	lockIcon: icon;
 	rippleAreaPadding: pixels;
 }
 
@@ -238,10 +239,6 @@ InputField {
 }
 
 OutlineButton {
-	outlineWidth: pixels;
-	outlineFg: color;
-	outlineFgOver: color;
-
 	textBg: color;
 	textBgOver: color;
 
@@ -290,6 +287,7 @@ MediaSlider {
 	inactiveFgOver: color;
 	activeFgDisabled: color;
 	inactiveFgDisabled: color;
+	receivedTillFg: color;
 	seekSize: size;
 	duration: int;
 }
@@ -400,7 +398,7 @@ Menu {
 	itemFgShortcutDisabled: color;
 	itemPadding: margins;
 	itemIconPosition: point;
-	itemFont: font;
+	itemStyle: TextStyle;
 	itemToggle: Toggle;
 	itemToggleOver: Toggle;
 	itemToggleShift: pixels;
@@ -525,6 +523,14 @@ InfoProfileButton {
 	toggleSkip: pixels;
 
 	ripple: RippleAnimation;
+}
+
+InfoProfileCountButton {
+	button: InfoProfileButton;
+	icon: icon;
+	iconPosition: point;
+	label: FlatLabel;
+	labelPosition: point;
 }
 
 PassportScanRow {
@@ -665,37 +671,6 @@ defaultFlatInput: FlatInput {
 	phDuration: 100;
 }
 
-defaultLeftOutlineButton: OutlineButton {
-	outlineWidth: 3px;
-	outlineFg: outlineButtonBg;
-	outlineFgOver: outlineButtonOutlineFg;
-
-	textBg: outlineButtonBg;
-	textBgOver: outlineButtonBgOver;
-
-	textFg: windowActiveTextFg;
-	textFgOver: windowActiveTextFg;
-
-	font: normalFont;
-	padding: margins(11px, 5px, 11px, 5px);
-
-	ripple: RippleAnimation(defaultRippleAnimation) {
-		color: outlineButtonBgRipple;
-	}
-}
-attentionLeftOutlineButton: OutlineButton(defaultLeftOutlineButton) {
-	outlineFgOver: attentionButtonFg;
-
-	textBgOver: attentionButtonBgOver;
-
-	textFg: attentionButtonFg;
-	textFgOver: attentionButtonFgOver;
-
-	ripple: RippleAnimation(defaultRippleAnimation) {
-		color: attentionButtonBgRipple;
-	}
-}
-
 defaultInputField: InputField {
 	textBg: windowBg;
 	textFg: windowFg;
@@ -725,7 +700,7 @@ defaultInputField: InputField {
 	heightMax: 148px;
 }
 
-defaultCheckboxIcon: icon {{ "default_checkbox_check", windowFgActive, point(4px, 7px) }};
+defaultCheckboxIcon: icon {{ "default_checkbox_check", overviewCheckFgActive, point(4px, 7px) }};
 
 defaultCheck: Check {
 	bg: transparent;
@@ -897,6 +872,7 @@ defaultContinuousSlider: MediaSlider {
 	inactiveFgOver: mediaPlayerInactiveFg;
 	activeFgDisabled: mediaPlayerInactiveFg;
 	inactiveFgDisabled: windowBg;
+	receivedTillFg: mediaPlayerInactiveFg;
 	seekSize: size(9px, 9px);
 	duration: 150;
 }
@@ -930,7 +906,7 @@ defaultMenu: Menu {
 	itemFgShortcutDisabled: menuFgDisabled;
 	itemIconPosition: point(0px, 0px);
 	itemPadding: margins(17px, 8px, 17px, 7px);
-	itemFont: normalFont;
+	itemStyle: defaultTextStyle;
 	itemToggle: defaultMenuToggle;
 	itemToggleOver: defaultMenuToggleOver;
 	itemToggleShift: 0px;
@@ -1136,8 +1112,6 @@ PeerList {
 }
 
 defaultPeerListButton: OutlineButton {
-	outlineWidth: 0px;
-
 	textBg: windowBg;
 	textBgOver: windowBgOver;
 
@@ -1196,4 +1170,22 @@ InfoTopBar {
 	searchRow: SearchFieldRow;
 	highlightBg: color;
 	highlightDuration: int;
+}
+
+LevelMeter {
+	height: pixels;
+	lineWidth: pixels;
+	lineSpacing: pixels;
+	lineCount: int;
+	activeFg: color;
+	inactiveFg: color;
+}
+
+defaultLevelMeter: LevelMeter {
+	height: 18px;
+	lineWidth: 3px;
+	lineSpacing: 5px;
+	lineCount: 44;
+	activeFg: mediaPlayerActiveFg;
+	inactiveFg: mediaPlayerInactiveFg;
 }

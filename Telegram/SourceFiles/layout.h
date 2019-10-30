@@ -14,6 +14,8 @@ struct TextState;
 struct StateRequest;
 } // namespace HistoryView
 
+enum RoundCorners : int;
+
 constexpr auto FullSelection = TextSelection { 0xFFFF, 0xFFFF };
 
 inline bool IsSubGroupSelection(TextSelection selection) {
@@ -68,14 +70,12 @@ style::color documentDarkColor(int colorIndex);
 style::color documentOverColor(int colorIndex);
 style::color documentSelectedColor(int colorIndex);
 RoundCorners documentCorners(int colorIndex);
-bool documentIsValidMediaFile(const QString &filepath);
-bool documentIsExecutableName(const QString &filename);
 
 class PaintContextBase {
 public:
-	PaintContextBase(TimeMs ms, bool selecting) : ms(ms), selecting(selecting) {
+	PaintContextBase(crl::time ms, bool selecting) : ms(ms), selecting(selecting) {
 	}
-	TimeMs ms;
+	crl::time ms;
 	bool selecting;
 
 };

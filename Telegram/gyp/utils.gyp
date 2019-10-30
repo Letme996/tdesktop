@@ -6,17 +6,16 @@
 
 {
   'includes': [
-    'common.gypi',
+    'common/common.gypi',
   ],
   'targets': [{
     'target_name': 'Updater',
     'variables': {
-      'libs_loc': '../../../Libraries',
       'src_loc': '../SourceFiles',
       'res_loc': '../Resources',
     },
     'includes': [
-      'common_executable.gypi',
+      'common/executable.gypi',
     ],
 
     'include_dirs': [
@@ -57,13 +56,12 @@
   }, {
     'target_name': 'Packer',
     'variables': {
-      'libs_loc': '../../../Libraries',
       'src_loc': '../SourceFiles',
       'mac_target': '10.10',
     },
     'includes': [
-      'common_executable.gypi',
-      'qt.gypi',
+      'common/executable.gypi',
+      'modules/qt.gypi',
     ],
     'conditions': [
       [ 'build_win', {
@@ -112,10 +110,10 @@
         'conditions': [
           [ 'build_win', {
             'include_dirs': [
-              '<(libs_loc)/openssl/Debug/include',
+              '<(libs_loc)/openssl/inc32',
             ],
             'library_dirs': [
-              '<(libs_loc)/openssl/Debug/lib',
+              '<(libs_loc)/openssl/out32.dbg',
               '<(libs_loc)/lzma/C/Util/LzmaLib/Debug',
               '<(libs_loc)/zlib/contrib/vstudio/vc14/x86/ZlibStatDebug',
             ],
@@ -134,10 +132,10 @@
         'conditions': [
           [ 'build_win', {
             'include_dirs': [
-              '<(libs_loc)/openssl/Release/include',
+              '<(libs_loc)/openssl/inc32',
             ],
             'library_dirs': [
-              '<(libs_loc)/openssl/Release/lib',
+              '<(libs_loc)/openssl/out32',
               '<(libs_loc)/lzma/C/Util/LzmaLib/Release',
               '<(libs_loc)/zlib/contrib/vstudio/vc14/x86/ZlibStatReleaseWithoutAsm',
             ],

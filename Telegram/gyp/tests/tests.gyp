@@ -6,10 +6,9 @@
 
 {
   'includes': [
-    '../common.gypi',
+    '../common/common.gypi',
   ],
   'variables': {
-    'libs_loc': '../../../../Libraries',
     'src_loc': '../../SourceFiles',
     'submodules_loc': '../../ThirdParty',
     'mac_target': '10.10',
@@ -19,7 +18,7 @@
     'target_name': 'tests',
     'type': 'none',
     'includes': [
-      '../common.gypi',
+      '../common/common.gypi',
     ],
     'dependencies': [
       '<!@(<(list_tests_command))',
@@ -93,6 +92,7 @@
       '<(src_loc)/rpl/combine.h',
       '<(src_loc)/rpl/combine_previous.h',
       '<(src_loc)/rpl/complete.h',
+      '<(src_loc)/rpl/conditional.h',
       '<(src_loc)/rpl/consumer.h',
       '<(src_loc)/rpl/deferred.h',
       '<(src_loc)/rpl/distinct_until_changed.h',
@@ -121,7 +121,7 @@
     'target_name': 'tests_storage',
     'includes': [
       'common_test.gypi',
-      '../openssl.gypi',
+      '../modules/openssl.gypi',
     ],
     'dependencies': [
       '../lib_storage.gyp:lib_storage',

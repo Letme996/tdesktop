@@ -7,22 +7,30 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-enum EntityInTextType {
-	EntityInTextInvalid = 0,
+#include "base/basic_types.h"
 
-	EntityInTextUrl,
-	EntityInTextCustomUrl,
-	EntityInTextEmail,
-	EntityInTextHashtag,
-	EntityInTextCashtag,
-	EntityInTextMention,
-	EntityInTextMentionName,
-	EntityInTextBotCommand,
+#include <QtCore/QList>
+#include <QtCore/QVector>
+#include <QtGui/QClipboard>
 
-	EntityInTextBold,
-	EntityInTextItalic,
-	EntityInTextCode, // inline
-	EntityInTextPre,  // block
+enum class EntityType {
+	Invalid = 0,
+
+	Url,
+	CustomUrl,
+	Email,
+	Hashtag,
+	Cashtag,
+	Mention,
+	MentionName,
+	BotCommand,
+
+	Bold,
+	Italic,
+	Underline,
+	StrikeOut,
+	Code, // inline
+	Pre,  // block
 };
 
 class EntityInText;
@@ -30,14 +38,13 @@ using EntitiesInText = QList<EntityInText>;
 
 class EntityInText {
 public:
-	EntityInText(EntityInTextType type, int offset, int length, const QString &data = QString())
-		: _type(type)
-		, _offset(offset)
-		, _length(length)
-		, _data(data) {
-	}
+	EntityInText(
+		EntityType type,
+		int offset,
+		int length,
+		const QString &data = QString());
 
-	EntityInTextType type() const {
+	EntityType type() const {
 		return _type;
 	}
 	int offset() const {
@@ -79,26 +86,32 @@ public:
 		}
 	}
 
-	static int firstMonospaceOffset(const EntitiesInText &entities, int textLength) {
-		int result = textLength;
-		for_const (auto &entity, entities) {
-			if (entity.type() == EntityInTextPre || entity.type() == EntityInTextCode) {
-				accumulate_min(result, entity.offset());
-			}
-		}
-		return result;
-	}
+	static int FirstMonospaceOffset(
+		const EntitiesInText &entities,
+		int textLength);
 
 	explicit operator bool() const {
-		return type() != EntityInTextInvalid;
+		return type() != EntityType::Invalid;
 	}
 
 private:
-	EntityInTextType _type;
-	int _offset, _length;
+	EntityType _type = EntityType::Invalid;
+	int _offset = 0;
+	int _length = 0;
 	QString _data;
 
 };
+
+inline bool operator==(const EntityInText &a, const EntityInText &b) {
+	return (a.type() == b.type())
+		&& (a.offset() == b.offset())
+		&& (a.length() == b.length())
+		&& (a.data() == b.data());
+}
+
+inline bool operator!=(const EntityInText &a, const EntityInText &b) {
+	return !(a == b);
+}
 
 struct TextWithEntities {
 	QString text;
@@ -106,6 +119,102 @@ struct TextWithEntities {
 
 	bool empty() const {
 		return text.isEmpty();
+	}
+
+	void reserve(int size, int entitiesCount = 0) {
+		text.reserve(size);
+		entities.reserve(entitiesCount);
+	}
+
+	TextWithEntities &append(TextWithEntities &&other) {
+		const auto shift = text.size();
+		for (auto &entity : other.entities) {
+			entity.shiftRight(shift);
+		}
+		text.append(other.text);
+		entities.append(other.entities);
+		return *this;
+	}
+	TextWithEntities &append(const QString &other) {
+		text.append(other);
+		return *this;
+	}
+	TextWithEntities &append(QLatin1String other) {
+		text.append(other);
+		return *this;
+	}
+	TextWithEntities &append(QChar other) {
+		text.append(other);
+		return *this;
+	}
+
+	static TextWithEntities Simple(const QString &simple) {
+		auto result = TextWithEntities();
+		result.text = simple;
+		return result;
+	}
+};
+
+inline bool operator==(
+		const TextWithEntities &a,
+		const TextWithEntities &b) {
+	return (a.text == b.text) && (a.entities == b.entities);
+}
+
+inline bool operator!=(
+		const TextWithEntities &a,
+		const TextWithEntities &b) {
+	return !(a == b);
+}
+
+struct TextForMimeData {
+	QString expanded;
+	TextWithEntities rich;
+
+	bool empty() const {
+		return expanded.isEmpty();
+	}
+
+	void reserve(int size, int entitiesCount = 0) {
+		expanded.reserve(size);
+		rich.reserve(size, entitiesCount);
+	}
+	TextForMimeData &append(TextForMimeData &&other) {
+		expanded.append(other.expanded);
+		rich.append(std::move(other.rich));
+		return *this;
+	}
+	TextForMimeData &append(TextWithEntities &&other) {
+		expanded.append(other.text);
+		rich.append(std::move(other));
+		return *this;
+	}
+	TextForMimeData &append(const QString &other) {
+		expanded.append(other);
+		rich.append(other);
+		return *this;
+	}
+	TextForMimeData &append(QLatin1String other) {
+		expanded.append(other);
+		rich.append(other);
+		return *this;
+	}
+	TextForMimeData &append(QChar other) {
+		expanded.append(other);
+		rich.append(other);
+		return *this;
+	}
+
+	static TextForMimeData Rich(TextWithEntities &&rich) {
+		auto result = TextForMimeData();
+		result.expanded = rich.text;
+		result.rich = std::move(rich);
+		return result;
+	}
+	static TextForMimeData Simple(const QString &simple) {
+		auto result = TextForMimeData();
+		result.expanded = result.rich.text = simple;
+		return result;
 	}
 };
 
@@ -166,25 +275,19 @@ QString MarkdownBoldGoodBefore();
 QString MarkdownBoldBadAfter();
 QString MarkdownItalicGoodBefore();
 QString MarkdownItalicBadAfter();
+QString MarkdownStrikeOutGoodBefore();
+QString MarkdownStrikeOutBadAfter();
 QString MarkdownCodeGoodBefore();
 QString MarkdownCodeBadAfter();
 QString MarkdownPreGoodBefore();
 QString MarkdownPreBadAfter();
-
-inline void Append(TextWithEntities &to, TextWithEntities &&append) {
-	auto entitiesShiftRight = to.text.size();
-	for (auto &entity : append.entities) {
-		entity.shiftRight(entitiesShiftRight);
-	}
-	to.text += append.text;
-	to.entities += append.entities;
-}
 
 // Text preprocess.
 QString Clean(const QString &text);
 QString EscapeForRichParsing(const QString &text);
 QString SingleLine(const QString &text);
 QString RemoveAccents(const QString &text);
+QString RemoveEmoji(const QString &text);
 QStringList PrepareSearchWords(const QString &query, const QRegularExpression *SplitterOverride = nullptr);
 bool CutPart(TextWithEntities &sending, TextWithEntities &left, int limit);
 
@@ -209,13 +312,6 @@ inline QString MentionNameDataFromFields(const MentionNameFields &fields) {
 	}
 	return result;
 }
-
-EntitiesInText EntitiesFromMTP(const QVector<MTPMessageEntity> &entities);
-enum class ConvertOption {
-	WithLocal,
-	SkipLocal,
-};
-MTPVector<MTPMessageEntity> EntitiesToMTP(const EntitiesInText &entities, ConvertOption option = ConvertOption::WithLocal);
 
 // New entities are added to the ones that are already in result.
 // Changes text if (flags & TextParseMarkdown).
@@ -242,28 +338,18 @@ void ApplyServerCleaning(TextWithEntities &result);
 QByteArray SerializeTags(const TextWithTags::Tags &tags);
 TextWithTags::Tags DeserializeTags(QByteArray data, int textLength);
 QString TagsMimeType();
+QString TagsTextMimeType();
+
+inline const auto kMentionTagStart = qstr("mention://user.");
+
+[[nodiscard]] bool IsMentionLink(const QString &link);
+EntitiesInText ConvertTextTagsToEntities(const TextWithTags::Tags &tags);
+TextWithTags::Tags ConvertEntitiesToTextTags(
+	const EntitiesInText &entities);
+std::unique_ptr<QMimeData> MimeDataFromText(const TextForMimeData &text);
+std::unique_ptr<QMimeData> MimeDataFromText(TextWithTags &&text);
+void SetClipboardText(
+	const TextForMimeData &text,
+	QClipboard::Mode mode = QClipboard::Clipboard);
 
 } // namespace TextUtilities
-
-namespace Lang {
-
-template <typename ResultString>
-struct StartReplacements;
-
-template <>
-struct StartReplacements<TextWithEntities> {
-	static inline TextWithEntities Call(QString &&langString) {
-		return { std::move(langString), EntitiesInText() };
-	}
-};
-
-template <typename ResultString>
-struct ReplaceTag;
-
-template <>
-struct ReplaceTag<TextWithEntities> {
-	static TextWithEntities Call(TextWithEntities &&original, ushort tag, const TextWithEntities &replacement);
-
-};
-
-} // namespace Lang

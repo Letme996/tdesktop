@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/effects/send_action_animations.h"
 
+#include "ui/effects/animation_value.h"
 #include "styles/style_widgets.h"
 
 namespace Ui {
@@ -196,14 +197,14 @@ void SendActionAnimation::Impl::paint(
 		int x,
 		int y,
 		int outerWidth,
-		TimeMs ms) {
+		crl::time ms) {
 	paintFrame(
 		p,
 		color,
 		x,
 		y,
 		outerWidth,
-		anim::Disabled() ? 0 : (qMax(ms - _started, 0LL) % _period));
+		anim::Disabled() ? 0 : (qMax(ms - _started, crl::time(0)) % _period));
 }
 
 

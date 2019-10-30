@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/wrap/slide_wrap.h"
 
+#include "styles/style_basic.h"
+
 #include <rpl/combine.h>
 #include <range/v3/algorithm/find.hpp>
 
@@ -73,7 +75,7 @@ SlideWrap<RpWidget> *SlideWrap<RpWidget>::toggle(
 }
 
 SlideWrap<RpWidget> *SlideWrap<RpWidget>::finishAnimating() {
-	_animation.finish();
+	_animation.stop();
 	animationStep();
 	return this;
 }
@@ -96,7 +98,7 @@ void SlideWrap<RpWidget>::animationStep() {
 		weak->moveToLeft(margins.left(), margins.top());
 		newWidth = weak->width();
 	}
-	auto current = _animation.current(_toggled ? 1. : 0.);
+	auto current = _animation.value(_toggled ? 1. : 0.);
 	auto newHeight = wrapped()
 		? (_animation.animating()
 		? anim::interpolate(0, wrapped()->heightNoMargins(), current)
@@ -107,7 +109,7 @@ void SlideWrap<RpWidget>::animationStep() {
 	}
 	auto shouldBeHidden = !_toggled && !_animation.animating();
 	if (shouldBeHidden != isHidden()) {
-		const auto guard = make_weak(this);
+		const auto guard = MakeWeak(this);
 		setVisible(!shouldBeHidden);
 		if (shouldBeHidden && guard) {
 			SendPendingMoveResizeEvents(this);

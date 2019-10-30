@@ -8,16 +8,30 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/crash_report_window.h"
 
 #include "core/crash_reports.h"
+#include "core/launcher.h"
+#include "core/sandbox.h"
+#include "core/update_checker.h"
 #include "window/main_window.h"
 #include "platform/platform_specific.h"
-#include "application.h"
 #include "base/zlib_help.h"
-#include "core/update_checker.h"
+#include "app.h"
+
+#include <QtWidgets/QFileDialog>
+#include <QtGui/QScreen>
+#include <QtGui/QDesktopServices>
+#include <QtCore/QStandardPaths>
+#include <QtCore/QTimer>
+
+namespace {
+
+constexpr auto kDefaultProxyPort = 80;
+
+} // namespace
 
 PreLaunchWindow *PreLaunchWindowInstance = nullptr;
 
 PreLaunchWindow::PreLaunchWindow(QString title) {
-	Fonts::Start();
+	style::internal::StartFonts();
 
 	setWindowIcon(Window::CreateIcon());
 	setWindowFlags(Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
@@ -60,7 +74,7 @@ PreLaunchWindow::~PreLaunchWindow() {
 
 PreLaunchLabel::PreLaunchLabel(QWidget *parent) : QLabel(parent) {
 	QFont labelFont(font());
-	labelFont.setFamily(Fonts::GetOverride(qsl("Open Sans Semibold")));
+	labelFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans Semibold")));
 	labelFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(labelFont);
 
@@ -78,7 +92,7 @@ void PreLaunchLabel::setText(const QString &text) {
 
 PreLaunchInput::PreLaunchInput(QWidget *parent, bool password) : QLineEdit(parent) {
 	QFont logFont(font());
-	logFont.setFamily(Fonts::GetOverride(qsl("Open Sans")));
+	logFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans")));
 	logFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(logFont);
 
@@ -96,7 +110,7 @@ PreLaunchInput::PreLaunchInput(QWidget *parent, bool password) : QLineEdit(paren
 
 PreLaunchLog::PreLaunchLog(QWidget *parent) : QTextEdit(parent) {
 	QFont logFont(font());
-	logFont.setFamily(Fonts::GetOverride(qsl("Open Sans")));
+	logFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans")));
 	logFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(logFont);
 
@@ -118,7 +132,7 @@ PreLaunchButton::PreLaunchButton(QWidget *parent, bool confirm) : QPushButton(pa
 	setObjectName(confirm ? "confirm" : "cancel");
 
 	QFont closeFont(font());
-	closeFont.setFamily(Fonts::GetOverride(qsl("Open Sans Semibold")));
+	closeFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans Semibold")));
 	closeFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(closeFont);
 
@@ -137,7 +151,7 @@ PreLaunchCheckbox::PreLaunchCheckbox(QWidget *parent) : QCheckBox(parent) {
 	setCheckState(Qt::Checked);
 
 	QFont closeFont(font());
-	closeFont.setFamily(Fonts::GetOverride(qsl("Open Sans Semibold")));
+	closeFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans Semibold")));
 	closeFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(closeFont);
 
@@ -198,8 +212,12 @@ LastCrashedWindow::UpdaterData::UpdaterData(QWidget *buttonParent)
 , skip(buttonParent, false) {
 }
 
-LastCrashedWindow::LastCrashedWindow()
-: _port(80)
+LastCrashedWindow::LastCrashedWindow(
+	not_null<Core::Launcher*> launcher,
+	const QByteArray &crashdump,
+	Fn<void()> launch)
+: _dumpraw(crashdump)
+, _port(kDefaultProxyPort)
 , _label(this)
 , _pleaseSendReport(this)
 , _yourReportName(this)
@@ -213,18 +231,15 @@ LastCrashedWindow::LastCrashedWindow()
 , _saveReport(this)
 , _getApp(this)
 , _includeUsername(this)
-, _reportText(QString::fromUtf8(Sandbox::LastCrashDump()))
+, _reportText(QString::fromUtf8(crashdump))
 , _reportShown(false)
 , _reportSaved(false)
-, _sendingState(Sandbox::LastCrashDump().isEmpty() ? SendingNoReport : SendingUpdateCheck)
+, _sendingState(crashdump.isEmpty() ? SendingNoReport : SendingUpdateCheck)
 , _updating(this)
-, _sendingProgress(0)
-, _sendingTotal(0)
-, _checkReply(0)
-, _sendReply(0)
 , _updaterData(Core::UpdaterDisabled()
 	? nullptr
-	: std::make_unique<UpdaterData>(this)) {
+	: std::make_unique<UpdaterData>(this))
+, _launch(std::move(launch)) {
 	excludeReportUsername();
 
 	if (!cInstallBetaVersion() && !cAlphaVersion()) { // currently accept crash reports only from testers
@@ -339,7 +354,7 @@ LastCrashedWindow::LastCrashedWindow()
 	}
 
 	_pleaseSendReport.setText(qsl("Please send us a crash report."));
-	_yourReportName.setText(qsl("Your Report Tag: %1\nYour User Tag: %2").arg(QString(_minidumpName).replace(".dmp", "")).arg(Sandbox::UserTag(), 0, 16));
+	_yourReportName.setText(qsl("Your Report Tag: %1\nYour User Tag: %2").arg(QString(_minidumpName).replace(".dmp", "")).arg(launcher->installationTag(), 0, 16));
 	_yourReportName.setCursor(style::cur_text);
 	_yourReportName.setTextInteractionFlags(Qt::TextSelectableByMouse);
 
@@ -386,9 +401,11 @@ void LastCrashedWindow::onSaveReport() {
 }
 
 QByteArray LastCrashedWindow::getCrashReportRaw() const {
-	QByteArray result(Sandbox::LastCrashDump());
+	auto result = _dumpraw;
 	if (!_reportUsername.isEmpty() && _includeUsername.checkState() != Qt::Checked) {
-		result.replace((qsl("Username: ") + _reportUsername).toUtf8(), "Username: _not_included_");
+		result.replace(
+			(qsl("Username: ") + _reportUsername).toUtf8(),
+			"Username: _not_included_");
 	}
 	return result;
 }
@@ -451,7 +468,7 @@ void LastCrashedWindow::onSendReport() {
 	}
 
 	QString apiid = getReportField(qstr("apiid"), qstr("ApiId:")), version = getReportField(qstr("version"), qstr("Version:"));
-	_checkReply = _sendManager.get(QNetworkRequest(qsl("https://tdesktop.com/crash.php?act=query_report&apiid=%1&version=%2&dmp=%3&platform=%4").arg(apiid).arg(version).arg(minidumpFileName().isEmpty() ? 0 : 1).arg(cPlatformString())));
+	_checkReply = _sendManager.get(QNetworkRequest(qsl("https://tdesktop.com/crash.php?act=query_report&apiid=%1&version=%2&dmp=%3&platform=%4").arg(apiid).arg(version).arg(minidumpFileName().isEmpty() ? 0 : 1).arg(CrashReports::PlatformString())));
 
 	connect(_checkReply, SIGNAL(error(QNetworkReply::NetworkError)), this, SLOT(onSendingError(QNetworkReply::NetworkError)));
 	connect(_checkReply, SIGNAL(finished()), this, SLOT(onCheckingFinished()));
@@ -775,7 +792,7 @@ void LastCrashedWindow::updateControls() {
 }
 
 void LastCrashedWindow::onNetworkSettings() {
-	const auto &proxy = Sandbox::PreLaunchProxy();
+	const auto &proxy = Core::Sandbox::Instance().sandboxProxy();
 	const auto box = new NetworkSettingsWindow(
 		this,
 		proxy.host,
@@ -797,7 +814,7 @@ void LastCrashedWindow::onNetworkSettingsSaved(
 		QString password) {
 	Expects(host.isEmpty() || port != 0);
 
-	auto &proxy = Sandbox::RefPreLaunchProxy();
+	auto proxy = ProxyData();
 	proxy.type = host.isEmpty()
 		? ProxyData::Type::None
 		: ProxyData::Type::Http;
@@ -805,9 +822,11 @@ void LastCrashedWindow::onNetworkSettingsSaved(
 	proxy.port = port;
 	proxy.user = username;
 	proxy.password = password;
+	_proxyChanges.fire(std::move(proxy));
+	proxyUpdated();
+}
 
-	Sandbox::refreshGlobalProxy();
-
+void LastCrashedWindow::proxyUpdated() {
 	if (_updaterData
 		&& ((_updaterData->state == UpdatingCheck)
 			|| (_updaterData->state == UpdatingFail
@@ -822,6 +841,10 @@ void LastCrashedWindow::onNetworkSettingsSaved(
 		onSendReport();
 	}
 	activate();
+}
+
+rpl::producer<ProxyData> LastCrashedWindow::proxyChanges() const {
+	return _proxyChanges.events();
 }
 
 void LastCrashedWindow::setUpdatingState(UpdatingState state, bool force) {
@@ -932,8 +955,8 @@ void LastCrashedWindow::onUpdateFailed() {
 void LastCrashedWindow::onContinue() {
 	if (CrashReports::Restart() == CrashReports::CantOpen) {
 		new NotStartedWindow();
-	} else if (!Global::started()) {
-		Sandbox::launch();
+	} else {
+		_launch();
 	}
 	close();
 }

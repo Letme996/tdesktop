@@ -7,21 +7,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/widgets/dropdown_menu.h"
 
-#include "application.h"
-#include "lang/lang_keys.h"
+#include <QtGui/QtEvents>
 
 namespace Ui {
 
 DropdownMenu::DropdownMenu(QWidget *parent, const style::DropdownMenu &st) : InnerDropdown(parent, st.wrap)
 , _st(st) {
-	_menu = setOwnedWidget(object_ptr<Ui::Menu>(this, _st.menu));
+	_menu = setOwnedWidget(object_ptr<Menu>(this, _st.menu));
 	init();
 }
 
 // Not ready with submenus yet.
 //DropdownMenu::DropdownMenu(QWidget *parent, QMenu *menu, const style::DropdownMenu &st) : InnerDropdown(parent, st.wrap)
 //, _st(st) {
-//	_menu = setOwnedWidget(object_ptr<Ui::Menu>(this, menu, _st.menu));
+//	_menu = setOwnedWidget(object_ptr<Menu>(this, menu, _st.menu));
 //	init();
 //
 //	for (auto action : actions()) {
@@ -52,15 +51,15 @@ void DropdownMenu::init() {
 	hide();
 }
 
-QAction *DropdownMenu::addAction(const QString &text, const QObject *receiver, const char* member, const style::icon *icon, const style::icon *iconOver) {
+not_null<QAction*> DropdownMenu::addAction(const QString &text, const QObject *receiver, const char* member, const style::icon *icon, const style::icon *iconOver) {
 	return _menu->addAction(text, receiver, member, icon, iconOver);
 }
 
-QAction *DropdownMenu::addAction(const QString &text, Fn<void()> callback, const style::icon *icon, const style::icon *iconOver) {
+not_null<QAction*> DropdownMenu::addAction(const QString &text, Fn<void()> callback, const style::icon *icon, const style::icon *iconOver) {
 	return _menu->addAction(text, std::move(callback), icon, iconOver);
 }
 
-QAction *DropdownMenu::addSeparator() {
+not_null<QAction*> DropdownMenu::addSeparator() {
 	return _menu->addSeparator();
 }
 
@@ -71,7 +70,7 @@ void DropdownMenu::clearActions() {
 	return _menu->clearActions();
 }
 
-DropdownMenu::Actions &DropdownMenu::actions() {
+const std::vector<not_null<QAction*>> &DropdownMenu::actions() const {
 	return _menu->actions();
 }
 
@@ -141,7 +140,7 @@ bool DropdownMenu::handleKeyPress(int key) {
 	} else if (key == Qt::Key_Escape) {
 		hideMenu(_parent ? true : false);
 		return true;
-	} else if (key == (rtl() ? Qt::Key_Right : Qt::Key_Left)) {
+	} else if (key == (style::RightToLeft() ? Qt::Key_Right : Qt::Key_Left)) {
 		if (_parent) {
 			hideMenu(true);
 			return true;
@@ -184,6 +183,18 @@ void DropdownMenu::hideEvent(QHideEvent *e) {
 			deleteLater();
 		}
 	}
+}
+
+void DropdownMenu::keyPressEvent(QKeyEvent *e) {
+	forwardKeyPress(e->key());
+}
+
+void DropdownMenu::mouseMoveEvent(QMouseEvent *e) {
+	forwardMouseMove(e->globalPos());
+}
+
+void DropdownMenu::mousePressEvent(QMouseEvent *e) {
+	forwardMousePress(e->globalPos());
 }
 
 void DropdownMenu::hideMenu(bool fast) {
@@ -231,7 +242,7 @@ void DropdownMenu::hideFinish() {
 //
 //	auto menuTopLeft = mapFromGlobal(_menu->mapToGlobal(QPoint(0, 0)));
 //	auto w = p - QPoint(0, menuTopLeft.y());
-//	auto r = Sandbox::screenGeometry(p);
+//	auto r = QApplication::desktop()->screenGeometry(p);
 //	if (rtl()) {
 //		if (w.x() - width() < r.x() - _padding.left()) {
 //			if (_parent && w.x() + _parent->width() - _padding.left() - _padding.right() + width() - _padding.right() <= r.x() + r.width()) {

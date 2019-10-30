@@ -8,17 +8,23 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "platform/mac/specific_mac.h"
 
 #include "lang/lang_keys.h"
-#include "application.h"
 #include "mainwidget.h"
 #include "history/history_widget.h"
 #include "core/crash_reports.h"
+#include "core/sandbox.h"
 #include "storage/localstorage.h"
 #include "mainwindow.h"
 #include "history/history_location_manager.h"
 #include "platform/mac/mac_utilities.h"
+#include "facades.h"
+
+#include <QtGui/QDesktopServices>
+#include <QtWidgets/QApplication>
+#include <QtWidgets/QDesktopWidget>
 
 #include <cstdlib>
 #include <execinfo.h>
+#include <sys/xattr.h>
 
 #include <Cocoa/Cocoa.h>
 #include <CoreFoundation/CFURL.h>
@@ -32,51 +38,22 @@ namespace {
 
 QStringList _initLogs;
 
-class _PsEventFilter : public QAbstractNativeEventFilter {
-public:
-	_PsEventFilter() {
-	}
-
-	bool nativeEventFilter(const QByteArray &eventType, void *message, long *result) {
-		auto wnd = App::wnd();
-		if (!wnd) return false;
-
-		return wnd->psFilterNativeEvent(message);
-	}
-};
-
-_PsEventFilter *_psEventFilter = nullptr;
-
 };
 
 namespace {
 
 QRect _monitorRect;
-TimeMs _monitorLastGot = 0;
+crl::time _monitorLastGot = 0;
 
 } // namespace
 
 QRect psDesktopRect() {
-	auto tnow = getms(true);
+	auto tnow = crl::now();
 	if (tnow > _monitorLastGot + 1000 || tnow < _monitorLastGot) {
 		_monitorLastGot = tnow;
 		_monitorRect = QApplication::desktop()->availableGeometry(App::wnd());
 	}
 	return _monitorRect;
-}
-
-void psShowOverAll(QWidget *w, bool canFocus) {
-	objc_showOverAll(w->winId(), canFocus);
-}
-
-void psBringToBack(QWidget *w) {
-	objc_bringToBack(w->winId());
-}
-
-QAbstractNativeEventFilter *psNativeEventFilter() {
-	delete _psEventFilter;
-	_psEventFilter = new _PsEventFilter();
-	return _psEventFilter;
 }
 
 void psWriteDump() {
@@ -86,106 +63,8 @@ void psWriteDump() {
 #endif // TDESKTOP_DISABLE_CRASH_REPORTS
 }
 
-QString demanglestr(const QString &mangled) {
-	QByteArray cmd = ("c++filt -n " + mangled).toUtf8();
-	FILE *f = popen(cmd.constData(), "r");
-	if (!f) return "BAD_SYMBOL_" + mangled;
-
-	QString result;
-	char buffer[4096] = {0};
-	while (!feof(f)) {
-		if (fgets(buffer, 4096, f) != NULL) {
-			result += buffer;
-		}
-	}
-	pclose(f);
-	return result.trimmed();
-}
-
-QString escapeShell(const QString &str) {
-	QString result;
-	const QChar *b = str.constData(), *e = str.constEnd();
-	for (const QChar *ch = b; ch != e; ++ch) {
-		if (*ch == ' ' || *ch == '"' || *ch == '\'' || *ch == '\\') {
-			if (result.isEmpty()) {
-				result.reserve(str.size() * 2);
-			}
-			if (ch > b) {
-				result.append(b, ch - b);
-			}
-			result.append('\\');
-			b = ch;
-		}
-	}
-	if (result.isEmpty()) return str;
-
-	if (e > b) {
-		result.append(b, e - b);
-	}
-	return result;
-}
-
-QStringList atosstr(uint64 *addresses, int count, uint64 base) {
-	QStringList result;
-	if (!count || cExeName().isEmpty()) return result;
-
-	result.reserve(count);
-	QString cmdstr = "atos -o " + escapeShell(cExeDir() + cExeName()) + qsl("/Contents/MacOS/Telegram -l 0x%1").arg(base, 0, 16);
-	for (int i = 0; i < count; ++i) {
-		if (addresses[i]) {
-			cmdstr += qsl(" 0x%1").arg(addresses[i], 0, 16);
-		}
-	}
-	QByteArray cmd = cmdstr.toUtf8();
-	FILE *f = popen(cmd.constData(), "r");
-
-	QStringList atosResult;
-	if (f) {
-		char buffer[4096] = {0};
-		while (!feof(f)) {
-			if (fgets(buffer, 4096, f) != NULL) {
-				atosResult.push_back(QString::fromUtf8(buffer));
-			}
-		}
-		pclose(f);
-	}
-	for (int i = 0, j = 0; i < count; ++i) {
-		if (addresses[i]) {
-			if (j < atosResult.size() && !atosResult.at(j).isEmpty() && !atosResult.at(j).startsWith(qstr("0x"))) {
-				result.push_back(atosResult.at(j).trimmed());
-			} else {
-				result.push_back(QString());
-			}
-			++j;
-		} else {
-			result.push_back(QString());
-		}
-	}
-	return result;
-
-}
-
 void psDeleteDir(const QString &dir) {
 	objc_deleteDir(dir);
-}
-
-namespace {
-
-auto _lastUserAction = 0LL;
-
-} // namespace
-
-void psUserActionDone() {
-	_lastUserAction = getms(true);
-}
-
-bool psIdleSupported() {
-	return objc_idleSupported();
-}
-
-TimeMs psIdleTime() {
-	auto idleTime = 0LL;
-	return objc_idleTime(idleTime) ? idleTime : (getms(true) - _lastUserAction);
 }
 
 QStringList psInitLogs() {
@@ -204,10 +83,6 @@ void psActivateProcess(uint64 pid) {
 
 QString psAppDataPath() {
 	return objc_appDataPath();
-}
-
-QString psDownloadPath() {
-	return objc_downloadPath();
 }
 
 void psDoCleanup() {
@@ -238,43 +113,19 @@ void start() {
 }
 
 void finish() {
-	delete _psEventFilter;
-	_psEventFilter = nullptr;
-
 	objc_finish();
-}
-
-void StartTranslucentPaint(QPainter &p, QPaintEvent *e) {
-#ifdef OS_MAC_OLD
-	p.setCompositionMode(QPainter::CompositionMode_Source);
-	p.fillRect(e->rect(), Qt::transparent);
-	p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-#endif // OS_MAC_OLD
-}
-
-QString SystemCountry() {
-	NSLocale *currentLocale = [NSLocale currentLocale];  // get the current locale.
-	NSString *countryCode = [currentLocale objectForKey:NSLocaleCountryCode];
-	return countryCode ? NS2QString(countryCode) : QString();
-}
-
-QString SystemLanguage() {
-	if (auto currentLocale = [NSLocale currentLocale]) { // get the current locale.
-		if (NSString *collator = [currentLocale objectForKey:NSLocaleCollatorIdentifier]) {
-			return NS2QString(collator);
-		}
-		if (NSString *identifier = [currentLocale objectForKey:NSLocaleIdentifier]) {
-			return NS2QString(identifier);
-		}
-		if (NSString *language = [currentLocale objectForKey:NSLocaleLanguageCode]) {
-			return NS2QString(language);
-		}
-	}
-	return QString();
 }
 
 QString CurrentExecutablePath(int argc, char *argv[]) {
 	return NS2QString([[NSBundle mainBundle] bundlePath]);
+}
+
+void RemoveQuarantine(const QString &path) {
+	const auto kQuarantineAttribute = "com.apple.quarantine";
+
+	DEBUG_LOG(("Removing quarantine attribute: %1").arg(path));
+	const auto local = QFile::encodeName(path);
+	removexattr(local.data(), kQuarantineAttribute, 0);
 }
 
 void RegisterCustomScheme() {
@@ -336,6 +187,73 @@ void OpenSystemSettingsForPermission(PermissionType type) {
 #endif // OS_MAC_OLD
 }
 
+bool OpenSystemSettings(SystemSettingsType type) {
+	switch (type) {
+	case SystemSettingsType::Audio:
+		[[NSWorkspace sharedWorkspace] openFile:@"/System/Library/PreferencePanes/Sound.prefPane"];
+		break;
+	}
+	return true;
+}
+
+// Taken from https://github.com/trueinteractions/tint/issues/53.
+std::optional<crl::time> LastUserInputTime() {
+	CFMutableDictionaryRef properties = 0;
+	CFTypeRef obj;
+	mach_port_t masterPort;
+	io_iterator_t iter;
+	io_registry_entry_t curObj;
+
+	IOMasterPort(MACH_PORT_NULL, &masterPort);
+
+	/* Get IOHIDSystem */
+	IOServiceGetMatchingServices(masterPort, IOServiceMatching("IOHIDSystem"), &iter);
+	if (iter == 0) {
+		return std::nullopt;
+	} else {
+		curObj = IOIteratorNext(iter);
+	}
+	if (IORegistryEntryCreateCFProperties(curObj, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS && properties != NULL) {
+		obj = CFDictionaryGetValue(properties, CFSTR("HIDIdleTime"));
+		CFRetain(obj);
+	} else {
+		return std::nullopt;
+	}
+
+	uint64 err = ~0L, idleTime = err;
+	if (obj) {
+		CFTypeID type = CFGetTypeID(obj);
+
+		if (type == CFDataGetTypeID()) {
+			CFDataGetBytes((CFDataRef) obj, CFRangeMake(0, sizeof(idleTime)), (UInt8*)&idleTime);
+		} else if (type == CFNumberGetTypeID()) {
+			CFNumberGetValue((CFNumberRef)obj, kCFNumberSInt64Type, &idleTime);
+		} else {
+			// error
+		}
+
+		CFRelease(obj);
+
+		if (idleTime != err) {
+			idleTime /= 1000000; // return as ms
+		}
+	} else {
+		// error
+	}
+
+	CFRelease((CFTypeRef)properties);
+	IOObjectRelease(curObj);
+	IOObjectRelease(iter);
+	if (idleTime == err) {
+		return std::nullopt;
+	}
+	return (crl::now() - static_cast<crl::time>(idleTime));
+}
+
+void IgnoreApplicationActivationRightNow() {
+	objc_ignoreApplicationActivationRightNow();
+}
+
 } // namespace Platform
 
 void psNewVersion() {
@@ -346,9 +264,6 @@ void psAutoStart(bool start, bool silent) {
 }
 
 void psSendToMenu(bool send, bool silent) {
-}
-
-void psUpdateOverlayed(QWidget *widget) {
 }
 
 void psDownloadPathEnableAccess() {
@@ -363,8 +278,8 @@ QByteArray psPathBookmark(const QString &path) {
 	return objc_pathBookmark(path);
 }
 
-bool psLaunchMaps(const LocationCoords &coords) {
-	return QDesktopServices::openUrl(qsl("https://maps.apple.com/?q=Point&z=16&ll=%1,%2").arg(coords.latAsString()).arg(coords.lonAsString()));
+bool psLaunchMaps(const Data::LocationPoint &point) {
+	return QDesktopServices::openUrl(qsl("https://maps.apple.com/?q=Point&z=16&ll=%1,%2").arg(point.latAsString()).arg(point.lonAsString()));
 }
 
 QString strNotificationAboutThemeChange() {

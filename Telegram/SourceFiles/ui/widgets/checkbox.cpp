@@ -7,14 +7,23 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/widgets/checkbox.h"
 
-#include "lang/lang_keys.h"
 #include "ui/effects/ripple_animation.h"
+#include "ui/ui_utility.h"
+
+#include <QtGui/QtEvents>
 
 namespace Ui {
 namespace {
 
 TextParseOptions _checkboxOptions = {
 	TextParseMultiline, // flags
+	0, // maxw
+	0, // maxh
+	Qt::LayoutDirectionAuto, // dir
+};
+
+TextParseOptions _checkboxRichOptions = {
+	TextParseMultiline | TextParseRichText, // flags
 	0, // maxw
 	0, // maxh
 	Qt::LayoutDirectionAuto, // dir
@@ -38,22 +47,19 @@ void AbstractCheckView::setChecked(bool checked, anim::type animated) {
 		}
 	} else if (changed) {
 		_toggleAnimation.start(
-			_updateCallback,
+			[=] { if (_updateCallback) _updateCallback(); },
 			_checked ? 0. : 1.,
 			_checked ? 1. : 0.,
 			_duration);
 	}
+	checkedChangedHook(animated);
 	if (changed) {
-		checkedChangedHook(animated);
 		_checks.fire_copy(_checked);
 	}
 }
 
 void AbstractCheckView::setUpdateCallback(Fn<void()> updateCallback) {
 	_updateCallback = std::move(updateCallback);
-	if (_toggleAnimation.animating()) {
-		_toggleAnimation.setUpdateCallback(_updateCallback);
-	}
 }
 
 void AbstractCheckView::update() {
@@ -63,11 +69,11 @@ void AbstractCheckView::update() {
 }
 
 void AbstractCheckView::finishAnimating() {
-	_toggleAnimation.finish();
+	_toggleAnimation.stop();
 }
 
-float64 AbstractCheckView::currentAnimationValue(TimeMs ms) {
-	return ms ? _toggleAnimation.current(ms, _checked ? 1. : 0.) : _toggleAnimation.current(_checked ? 1. : 0.);
+float64 AbstractCheckView::currentAnimationValue() {
+	return _toggleAnimation.value(_checked ? 1. : 0.);
 }
 
 bool AbstractCheckView::animating() const {
@@ -90,18 +96,18 @@ void ToggleView::setStyle(const style::Toggle &st) {
 	_st = &st;
 }
 
-void ToggleView::paint(Painter &p, int left, int top, int outerWidth, TimeMs ms) {
+void ToggleView::paint(Painter &p, int left, int top, int outerWidth) {
 	left += _st->border;
 	top += _st->border;
 
 	PainterHighQualityEnabler hq(p);
-	auto toggled = currentAnimationValue(ms);
+	auto toggled = currentAnimationValue();
 	auto fullWidth = _st->diameter + _st->width;
 	auto innerDiameter = _st->diameter - 2 * _st->shift;
 	auto innerRadius = float64(innerDiameter) / 2.;
 	auto toggleLeft = left + anim::interpolate(0, fullWidth - _st->diameter, toggled);
-	auto bgRect = rtlrect(left + _st->shift, top + _st->shift, fullWidth - 2 * _st->shift, innerDiameter, outerWidth);
-	auto fgRect = rtlrect(toggleLeft, top, _st->diameter, _st->diameter, outerWidth);
+	auto bgRect = style::rtlrect(left + _st->shift, top + _st->shift, fullWidth - 2 * _st->shift, innerDiameter, outerWidth);
+	auto fgRect = style::rtlrect(toggleLeft, top, _st->diameter, _st->diameter, outerWidth);
 	auto fgBrush = anim::brush(_st->untoggledFg, _st->toggledFg, toggled);
 
 	p.setPen(Qt::NoPen);
@@ -115,20 +121,28 @@ void ToggleView::paint(Painter &p, int left, int top, int outerWidth, TimeMs ms)
 	p.drawEllipse(fgRect);
 
 	if (_st->xsize > 0) {
-		paintXV(p, toggleLeft, top, outerWidth, toggled, fgBrush);
+		p.setPen(Qt::NoPen);
+		p.setBrush(fgBrush);
+		if (_locked) {
+			const auto color = anim::color(_st->untoggledFg, _st->toggledFg, toggled);
+			_st->lockIcon.paint(p, toggleLeft, top, outerWidth, color);
+		} else {
+			paintXV(p, toggleLeft, top, outerWidth, toggled, fgBrush);
+		}
 	}
 }
 
 void ToggleView::paintXV(Painter &p, int left, int top, int outerWidth, float64 toggled, const QBrush &brush) {
-	Assert(_st->vsize > 0);
-	Assert(_st->stroke > 0);
+	Expects(_st->vsize > 0);
+	Expects(_st->stroke > 0);
+
 	static const auto sqrt2 = sqrt(2.);
-	auto stroke = (0. + _st->stroke) / sqrt2;
+	const auto stroke = (0. + _st->stroke) / sqrt2;
 	if (toggled < 1) {
 		// Just X or X->V.
-		auto xSize = 0. + _st->xsize;
-		auto xLeft = left + (_st->diameter - xSize) / 2.;
-		auto xTop = top + (_st->diameter - xSize) / 2.;
+		const auto xSize = 0. + _st->xsize;
+		const auto xLeft = left + (_st->diameter - xSize) / 2.;
+		const auto xTop = top + (_st->diameter - xSize) / 2.;
 		QPointF pathX[] = {
 			{ xLeft, xTop + stroke },
 			{ xLeft + stroke, xTop },
@@ -144,14 +158,14 @@ void ToggleView::paintXV(Painter &p, int left, int top, int outerWidth, float64 
 			{ xLeft + (xSize / 2.) - stroke, xTop + (xSize / 2.) },
 		};
 		for (auto &point : pathX) {
-			point = rtlpoint(point, outerWidth);
+			point = style::rtlpoint(point, outerWidth);
 		}
 		if (toggled > 0) {
 			// X->V.
-			auto vSize = 0. + _st->vsize;
-			auto fSize = (xSize + vSize - 2. * stroke);
-			auto vLeft = left + (_st->diameter - fSize) / 2.;
-			auto vTop = 0. + xTop + _st->vshift;
+			const auto vSize = 0. + _st->vsize;
+			const auto fSize = (xSize + vSize - 2. * stroke);
+			const auto vLeft = left + (_st->diameter - fSize) / 2.;
+			const auto vTop = 0. + xTop + _st->vshift;
 			QPointF pathV[] = {
 				{ vLeft, vTop + xSize - vSize + stroke },
 				{ vLeft + stroke, vTop + xSize - vSize },
@@ -167,7 +181,7 @@ void ToggleView::paintXV(Painter &p, int left, int top, int outerWidth, float64 
 				{ vLeft + vSize - 2 * stroke, vTop + xSize - stroke },
 			};
 			for (auto &point : pathV) {
-				point = rtlpoint(point, outerWidth);
+				point = style::rtlpoint(point, outerWidth);
 			}
 			p.fillPath(anim::interpolate(pathX, pathV, toggled), brush);
 		} else {
@@ -176,12 +190,12 @@ void ToggleView::paintXV(Painter &p, int left, int top, int outerWidth, float64 
 		}
 	} else {
 		// Just V.
-		auto xSize = 0. + _st->xsize;
-		auto xTop = top + (_st->diameter - xSize) / 2.;
-		auto vSize = 0. + _st->vsize;
-		auto fSize = (xSize + vSize - 2. * stroke);
-		auto vLeft = left + (_st->diameter - (_st->xsize + _st->vsize - 2. * stroke)) / 2.;
-		auto vTop = 0. + xTop + _st->vshift;
+		const auto xSize = 0. + _st->xsize;
+		const auto xTop = top + (_st->diameter - xSize) / 2.;
+		const auto vSize = 0. + _st->vsize;
+		const auto fSize = (xSize + vSize - 2. * stroke);
+		const auto vLeft = left + (_st->diameter - (_st->xsize + _st->vsize - 2. * stroke)) / 2.;
+		const auto vTop = 0. + xTop + _st->vshift;
 		QPointF pathV[] = {
 			{ vLeft, vTop + xSize - vSize + stroke },
 			{ vLeft + stroke, vTop + xSize - vSize },
@@ -214,6 +228,13 @@ bool ToggleView::checkRippleStartPosition(QPoint position) const {
 	return QRect(QPoint(0, 0), rippleSize()).contains(position);
 }
 
+void ToggleView::setLocked(bool locked) {
+	if (_locked != locked) {
+		_locked = locked;
+		update();
+	}
+}
+
 CheckView::CheckView(const style::Check &st, bool checked, Fn<void()> updateCallback) : AbstractCheckView(st.duration, checked, std::move(updateCallback))
 , _st(&st) {
 }
@@ -226,8 +247,8 @@ void CheckView::setStyle(const style::Check &st) {
 	_st = &st;
 }
 
-void CheckView::paint(Painter &p, int left, int top, int outerWidth, TimeMs ms) {
-	auto toggled = currentAnimationValue(ms);
+void CheckView::paint(Painter &p, int left, int top, int outerWidth) {
+	auto toggled = currentAnimationValue();
 	auto pen = _untoggledOverride
 		? anim::pen(*_untoggledOverride, _st->toggledFg, toggled)
 		: anim::pen(_st->untoggledFg, _st->toggledFg, toggled);
@@ -242,7 +263,7 @@ void CheckView::paint(Painter &p, int left, int top, int outerWidth, TimeMs ms) 
 
 	{
 		PainterHighQualityEnabler hq(p);
-		p.drawRoundedRect(rtlrect(QRectF(left, top, _st->diameter, _st->diameter).marginsRemoved(QMarginsF(_st->thickness / 2., _st->thickness / 2., _st->thickness / 2., _st->thickness / 2.)), outerWidth), st::buttonRadius - (_st->thickness / 2.), st::buttonRadius - (_st->thickness / 2.));
+		p.drawRoundedRect(style::rtlrect(QRectF(left, top, _st->diameter, _st->diameter).marginsRemoved(QMarginsF(_st->thickness / 2., _st->thickness / 2., _st->thickness / 2., _st->thickness / 2.)), outerWidth), st::buttonRadius - (_st->thickness / 2.), st::buttonRadius - (_st->thickness / 2.));
 	}
 
 	if (toggled > 0) {
@@ -284,10 +305,10 @@ void RadioView::setStyle(const style::Radio &st) {
 	_st = &st;
 }
 
-void RadioView::paint(Painter &p, int left, int top, int outerWidth, TimeMs ms) {
+void RadioView::paint(Painter &p, int left, int top, int outerWidth) {
 	PainterHighQualityEnabler hq(p);
 
-	auto toggled = currentAnimationValue(ms);
+	auto toggled = currentAnimationValue();
 	auto pen = _toggledOverride
 		? (_untoggledOverride
 			? anim::pen(*_untoggledOverride, *_toggledOverride, toggled)
@@ -300,7 +321,7 @@ void RadioView::paint(Painter &p, int left, int top, int outerWidth, TimeMs ms) 
 	p.setBrush(_st->bg);
 	//int32 skip = qCeil(_st->thickness / 2.);
 	//p.drawEllipse(_checkRect.marginsRemoved(QMargins(skip, skip, skip, skip)));
-	p.drawEllipse(rtlrect(QRectF(left, top, _st->diameter, _st->diameter).marginsRemoved(QMarginsF(_st->thickness / 2., _st->thickness / 2., _st->thickness / 2., _st->thickness / 2.)), outerWidth));
+	p.drawEllipse(style::rtlrect(QRectF(left, top, _st->diameter, _st->diameter).marginsRemoved(QMarginsF(_st->thickness / 2., _st->thickness / 2., _st->thickness / 2., _st->thickness / 2.)), outerWidth));
 
 	if (toggled > 0) {
 		p.setPen(Qt::NoPen);
@@ -313,7 +334,7 @@ void RadioView::paint(Painter &p, int left, int top, int outerWidth, TimeMs ms) 
 				: anim::brush(_st->untoggledFg, _st->toggledFg, toggled)));
 
 		auto skip0 = _st->diameter / 2., skip1 = _st->skip / 10., checkSkip = skip0 * (1. - toggled) + skip1 * toggled;
-		p.drawEllipse(rtlrect(QRectF(left, top, _st->diameter, _st->diameter).marginsRemoved(QMarginsF(checkSkip, checkSkip, checkSkip, checkSkip)), outerWidth));
+		p.drawEllipse(style::rtlrect(QRectF(left, top, _st->diameter, _st->diameter).marginsRemoved(QMarginsF(checkSkip, checkSkip, checkSkip, checkSkip)), outerWidth));
 		//int32 fskip = qFloor(checkSkip), cskip = qCeil(checkSkip);
 		//if (2 * fskip < _checkRect.width()) {
 		//	if (fskip != cskip) {
@@ -389,10 +410,23 @@ Checkbox::Checkbox(
 : RippleButton(parent, st.ripple)
 , _st(st)
 , _check(std::move(check))
-, _text(_st.style, text, _checkboxOptions) {
-	_check->setUpdateCallback([=] { updateCheck(); });
+, _text(
+		_st.style,
+		text,
+		_checkboxOptions,
+		countTextMinWidth()) {
+	_check->setUpdateCallback([=] { update(); });
 	resizeToText();
 	setCursor(style::cur_pointer);
+}
+
+int Checkbox::countTextMinWidth() const {
+	const auto leftSkip = _st.checkPosition.x()
+		+ checkRect().width()
+		+ _st.textPosition.x();
+	return (_st.width > 0)
+		? std::max(_st.width - leftSkip, 1)
+		: QFIXED_MAX;
 }
 
 QRect Checkbox::checkRect() const {
@@ -411,8 +445,8 @@ QRect Checkbox::checkRect() const {
 	}, size);
 }
 
-void Checkbox::setText(const QString &text) {
-	_text.setText(_st.style, text, _checkboxOptions);
+void Checkbox::setText(const QString &text, bool rich) {
+	_text.setText(_st.style, text, rich ? _checkboxRichOptions : _checkboxOptions);
 	resizeToText();
 	update();
 }
@@ -420,12 +454,31 @@ void Checkbox::setText(const QString &text) {
 void Checkbox::setCheckAlignment(style::align alignment) {
 	if (_checkAlignment != alignment) {
 		_checkAlignment = alignment;
+		resizeToText();
 		update();
 	}
 }
 
+void Checkbox::setAllowTextLines(int lines) {
+	_allowTextLines = lines;
+	resizeToText();
+	update();
+}
+
+void Checkbox::setTextBreakEverywhere(bool allow) {
+	_textBreakEverywhere = allow;
+}
+
 bool Checkbox::checked() const {
 	return _check->checked();
+}
+
+rpl::producer<bool> Checkbox::checkedChanges() const {
+	return _checkedChanges.events();
+}
+
+rpl::producer<bool> Checkbox::checkedValue() const {
+	return _checkedChanges.events_starting_with(checked());
 }
 
 void Checkbox::resizeToText() {
@@ -440,7 +493,7 @@ void Checkbox::setChecked(bool checked, NotifyAboutChange notify) {
 	if (_check->checked() != checked) {
 		_check->setChecked(checked, anim::type::normal);
 		if (notify == NotifyAboutChange::Notify) {
-			checkedChanged.notify(checked, true);
+			_checkedChanges.fire_copy(checked);
 		}
 	}
 }
@@ -464,8 +517,8 @@ void Checkbox::paintEvent(QPaintEvent *e) {
 	Painter p(this);
 
 	auto check = checkRect();
-	auto ms = getms();
-	auto active = _check->currentAnimationValue(ms);
+	auto ms = crl::now();
+	auto active = _check->currentAnimationValue();
 	if (isDisabled()) {
 		p.setOpacity(_st.disabledOpacity);
 	} else {
@@ -474,7 +527,6 @@ void Checkbox::paintEvent(QPaintEvent *e) {
 			p,
 			check.x() + _st.rippleAreaPosition.x(),
 			check.y() + _st.rippleAreaPosition.y(),
-			ms,
 			&color);
 	}
 
@@ -486,55 +538,103 @@ void Checkbox::paintEvent(QPaintEvent *e) {
 			_check->paint(p, check.left(), check.top(), width());
 		}
 	}
-	if (realCheckRect.contains(e->rect())) return;
+	if (realCheckRect.contains(e->rect()) || _text.isEmpty()) {
+		return;
+	}
 
-	auto leftSkip = _st.checkPosition.x()
+	const auto alignLeft = (_checkAlignment & Qt::AlignLeft);
+	const auto alignRight = (_checkAlignment & Qt::AlignRight);
+	const auto textSkip = _st.checkPosition.x()
 		+ check.width()
 		+ _st.textPosition.x();
-	auto availableTextWidth = qMax(width() - leftSkip, 1);
+	const auto availableTextWidth = (alignLeft || alignRight)
+		? std::max(width() - textSkip, 1)
+		: std::max(width() - _st.margin.left() - _st.margin.right(), 1);
+	const auto textTop = _st.margin.top() + _st.textPosition.y();
 
-	if (!_text.isEmpty()) {
-		p.setPen(anim::pen(_st.textFg, _st.textFgActive, active));
-		auto textSkip = _st.checkPosition.x()
-			+ check.width()
-			+ _st.textPosition.x();
-		auto textTop = _st.margin.top() + _st.textPosition.y();
-		if (_checkAlignment & Qt::AlignLeft) {
-			_text.drawLeftElided(
-				p,
-				textSkip,
-				textTop,
-				availableTextWidth,
-				width());
-		} else if (_checkAlignment & Qt::AlignRight) {
-			_text.drawRightElided(
+	p.setPen(anim::pen(_st.textFg, _st.textFgActive, active));
+	if (alignLeft) {
+		if (!_allowTextLines) {
+			_text.drawLeft(
 				p,
 				textSkip,
 				textTop,
 				availableTextWidth,
 				width());
 		} else {
-			_text.drawLeft(
+			_text.drawLeftElided(
 				p,
-				_st.margin.left(),
+				textSkip,
 				textTop,
-				width() - _st.margin.left() - _st.margin.right(),
+				availableTextWidth,
 				width(),
-				style::al_top);
+				_allowTextLines,
+				style::al_left,
+				0,
+				-1,
+				0,
+				_textBreakEverywhere);
 		}
+	} else if (alignRight) {
+		if (!_allowTextLines) {
+			_text.drawRight(
+				p,
+				textSkip,
+				textTop,
+				availableTextWidth,
+				width());
+		} else {
+			_text.drawRightElided(
+				p,
+				textSkip,
+				textTop,
+				availableTextWidth,
+				width(),
+				_allowTextLines,
+				style::al_left,
+				0,
+				-1,
+				0,
+				_textBreakEverywhere);
+		}
+	} else if (!_allowTextLines
+		|| (_text.countHeight(availableTextWidth)
+			< (_allowTextLines + 1) * _st.style.font->height)) {
+		_text.drawLeft(
+			p,
+			_st.margin.left(),
+			textTop,
+			width() - _st.margin.left() - _st.margin.right(),
+			width(),
+			style::al_top);
+	} else {
+		_text.drawLeftElided(
+			p,
+			_st.margin.left(),
+			textTop,
+			width() - _st.margin.left() - _st.margin.right(),
+			width(),
+			_allowTextLines,
+			style::al_top,
+			0,
+			-1,
+			0,
+			_textBreakEverywhere);
 	}
 }
 
 QPixmap Checkbox::grabCheckCache() const {
 	auto checkSize = _check->getSize();
-	auto image = QImage(checkSize * cIntRetinaFactor(), QImage::Format_ARGB32_Premultiplied);
+	auto image = QImage(
+		checkSize * style::DevicePixelRatio(),
+		QImage::Format_ARGB32_Premultiplied);
 	image.fill(Qt::transparent);
-	image.setDevicePixelRatio(cRetinaFactor());
+	image.setDevicePixelRatio(style::DevicePixelRatio());
 	{
 		Painter p(&image);
 		_check->paint(p, 0, 0, checkSize.width());
 	}
-	return App::pixmapFromImageInPlace(std::move(image));
+	return PixmapFromImage(std::move(image));
 }
 
 void Checkbox::onStateChanged(State was, StateChangeSource source) {
@@ -563,13 +663,21 @@ void Checkbox::handlePress() {
 
 int Checkbox::resizeGetHeight(int newWidth) {
 	const auto result = _check->getSize().height();
-	if (!(_checkAlignment & Qt::AlignHCenter)) {
+	const auto centered = ((_checkAlignment & Qt::AlignHCenter) != 0);
+	if (!centered && _allowTextLines == 1) {
 		return result;
 	}
-	const auto textBottom = _st.margin.top()
-		+ _st.textPosition.y()
-		+ _text.countHeight(
-			newWidth - _st.margin.left() - _st.margin.right());
+	const auto leftSkip = _st.checkPosition.x()
+		+ checkRect().width()
+		+ _st.textPosition.x();
+	const auto availableTextWidth = centered
+		? (newWidth - _st.margin.left() - _st.margin.right())
+		: std::max(width() - leftSkip, 1);
+	const auto textHeight = _text.countHeight(availableTextWidth);
+	const auto textBottom = _st.textPosition.y()
+		+ (_allowTextLines
+			? std::min(textHeight, _allowTextLines * _st.style.font->height)
+			: textHeight);
 	return std::max(result, textBottom);
 }
 
@@ -595,11 +703,11 @@ void RadiobuttonGroup::setValue(int value) {
 	}
 	_hasValue = true;
 	_value = value;
-	for (auto button : _buttons) {
+	for (const auto button : _buttons) {
 		button->handleNewGroupValue(_value);
 	}
-	if (_changedCallback) {
-		_changedCallback(_value);
+	if (const auto callback = _changedCallback) {
+		callback(_value);
 	}
 }
 
@@ -635,19 +743,24 @@ Radiobutton::Radiobutton(
 	std::move(check))
 , _group(group)
 , _value(value) {
+	using namespace rpl::mappers;
+
 	checkbox()->setChecked(group->hasValue() && group->value() == value);
 	_group->registerButton(this);
-	subscribe(checkbox()->checkedChanged, [this](bool checked) {
-		if (checked) {
-			_group->setValue(_value);
-		}
-	});
+	checkbox()->checkedChanges(
+	) | rpl::filter(
+		_1
+	) | rpl::start_with_next([=] {
+		_group->setValue(_value);
+	}, lifetime());
 }
 
 void Radiobutton::handleNewGroupValue(int value) {
 	auto checked = (value == _value);
 	if (checkbox()->checked() != checked) {
-		checkbox()->setChecked(checked, Ui::Checkbox::NotifyAboutChange::DontNotify);
+		checkbox()->setChecked(
+			checked,
+			Ui::Checkbox::NotifyAboutChange::DontNotify);
 	}
 }
 

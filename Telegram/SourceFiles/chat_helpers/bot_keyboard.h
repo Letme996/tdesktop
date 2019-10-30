@@ -30,7 +30,7 @@ public:
 	bool hasMarkup() const;
 	bool forceReply() const;
 
-	void step_selected(TimeMs ms, bool timer);
+	void step_selected(crl::time ms, bool timer);
 	void resizeToWidth(int newWidth, int maxOuterHeight) {
 		_maxOuterHeight = maxOuterHeight;
 		return TWidget::resizeToWidth(newWidth);
@@ -46,6 +46,7 @@ public:
 	// AbstractTooltipShower interface
 	QString tooltipText() const override;
 	QPoint tooltipPos() const override;
+	bool tooltipWindowActive() const override;
 
 	// ClickHandlerHost interface
 	void clickHandlerActiveChanged(const ClickHandlerPtr &p, bool active) override;

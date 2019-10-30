@@ -8,6 +8,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "base/timer.h"
+#include "base/object_ptr.h"
+#include "ui/effects/animations.h"
+#include "ui/text/text.h"
+#include "ui/rp_widget.h"
+#include "ui/rect_part.h"
 
 namespace style {
 struct Tooltip;
@@ -20,21 +25,16 @@ class AbstractTooltipShower {
 public:
 	virtual QString tooltipText() const = 0;
 	virtual QPoint tooltipPos() const = 0;
-	virtual bool tooltipWindowActive() const;
+	virtual bool tooltipWindowActive() const = 0;
 	virtual const style::Tooltip *tooltipSt() const;
 	virtual ~AbstractTooltipShower();
 
 };
 
-class Tooltip : public TWidget {
-	Q_OBJECT
-
+class Tooltip : public RpWidget {
 public:
 	static void Show(int32 delay, const AbstractTooltipShower *shower);
 	static void Hide();
-
-private slots:
-	void onWndActiveChanged();
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -54,7 +54,7 @@ private:
 	const AbstractTooltipShower *_shower = nullptr;
 	base::Timer _showTimer;
 
-	Text _text;
+	Text::String _text;
 	QPoint _point;
 
 	const style::Tooltip *_st = nullptr;
@@ -73,15 +73,15 @@ public:
 
 	void toggleAnimated(bool visible);
 	void toggleFast(bool visible);
-	void hideAfter(TimeMs timeout);
+	void hideAfter(crl::time timeout);
 
 	void setHiddenCallback(Fn<void()> callback) {
 		_hiddenCallback = std::move(callback);
 	}
 
 protected:
-	void resizeEvent(QResizeEvent *e);
-	void paintEvent(QPaintEvent *e);
+	void resizeEvent(QResizeEvent *e) override;
+	void paintEvent(QPaintEvent *e) override;
 
 private:
 	void animationCallback();
@@ -99,7 +99,7 @@ private:
 	RectParts _side = RectPart::Top | RectPart::Left;
 	QPixmap _arrow;
 
-	Animation _visibleAnimation;
+	Ui::Animations::Simple _visibleAnimation;
 	bool _visible = false;
 	Fn<void()> _hiddenCallback;
 	bool _useTransparency = true;

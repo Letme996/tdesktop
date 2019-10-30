@@ -8,11 +8,28 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "ui/rp_widget.h"
+#include "ui/effects/animations.h"
+#include "base/object_ptr.h"
+#include "base/flags.h"
+
+namespace Lottie {
+class SinglePlayer;
+} // namespace Lottie
+
+class BoxContent;
+
+enum class LayerOption {
+	CloseOther = (1 << 0),
+	KeepOther = (1 << 1),
+	ShowAfterOther = (1 << 2),
+};
+using LayerOptions = base::flags<LayerOption>;
+inline constexpr auto is_flag_type(LayerOption) { return true; };
 
 namespace Window {
 
 class MainMenu;
-class Controller;
+class SessionController;
 class SectionMemento;
 struct SectionShow;
 
@@ -55,18 +72,12 @@ public:
 
 protected:
 	void closeLayer() {
-		if (_closedCallback) {
-			_closedCallback();
+		if (const auto callback = base::take(_closedCallback)) {
+			callback();
 		}
 	}
-	void mousePressEvent(QMouseEvent *e) override {
-		e->accept();
-	}
-	void resizeEvent(QResizeEvent *e) override {
-		if (_resizedCallback) {
-			_resizedCallback();
-		}
-	}
+	void mousePressEvent(QMouseEvent *e) override;
+	void resizeEvent(QResizeEvent *e) override;
 	virtual void doSetInnerFocus() {
 		setFocus();
 	}
@@ -81,8 +92,6 @@ private:
 };
 
 class LayerStackWidget : public Ui::RpWidget {
-	Q_OBJECT
-
 public:
 	LayerStackWidget(QWidget *parent);
 
@@ -97,7 +106,7 @@ public:
 		object_ptr<LayerWidget> layer,
 		anim::type animated);
 	void showMainMenu(
-		not_null<Window::Controller*> controller,
+		not_null<Window::SessionController*> controller,
 		anim::type animated);
 	bool takeToThirdSection();
 
@@ -126,11 +135,6 @@ protected:
 	void mousePressEvent(QMouseEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
 
-private slots:
-	void onLayerDestroyed(QObject *obj);
-	void onLayerClosed(LayerWidget *layer);
-	void onLayerResized();
-
 private:
 	void appendBox(
 		object_ptr<BoxContent> box,
@@ -141,12 +145,14 @@ private:
 	void replaceBox(
 		object_ptr<BoxContent> box,
 		anim::type animated);
+	void backgroundClicked();
 
 	LayerWidget *pushBox(
 		object_ptr<BoxContent> box,
 		anim::type animated);
 	void showFinished();
 	void hideCurrent(anim::type animated);
+	void closeLayer(not_null<LayerWidget*> layer);
 
 	enum class Action {
 		ShowMainMenu,
@@ -173,15 +179,17 @@ private:
 	void updateLayerBoxes();
 	void fixOrder();
 	void sendFakeMouseEvent();
+	void clearClosingLayers();
 
 	LayerWidget *currentLayer() {
-		return _layers.empty() ? nullptr : _layers.back();
+		return _layers.empty() ? nullptr : _layers.back().get();
 	}
 	const LayerWidget *currentLayer() const {
 		return const_cast<LayerStackWidget*>(this)->currentLayer();
 	}
 
-	QList<LayerWidget*> _layers;
+	std::vector<std::unique_ptr<LayerWidget>> _layers;
+	std::vector<std::unique_ptr<LayerWidget>> _closingLayers;
 
 	object_ptr<LayerWidget> _specialLayer = { nullptr };
 	object_ptr<MainMenu> _mainMenu = { nullptr };
@@ -196,60 +204,10 @@ private:
 
 } // namespace Window
 
-class MediaPreviewWidget : public TWidget, private base::Subscriber {
-	Q_OBJECT
+class GenericBox;
 
-public:
-	MediaPreviewWidget(QWidget *parent, not_null<Window::Controller*> controller);
-
-	void showPreview(
-		Data::FileOrigin origin,
-		not_null<DocumentData*> document);
-	void showPreview(
-		Data::FileOrigin origin,
-		not_null<PhotoData*> photo);
-	void hidePreview();
-
-	~MediaPreviewWidget();
-
-protected:
-	void paintEvent(QPaintEvent *e) override;
-	void resizeEvent(QResizeEvent *e) override;
-
-private:
-	QSize currentDimensions() const;
-	QPixmap currentImage() const;
-	void startShow();
-	void fillEmojiString();
-	void resetGifAndCache();
-
-	not_null<Window::Controller*> _controller;
-
-	Animation _a_shown;
-	bool _hiding = false;
-	Data::FileOrigin _origin;
-	DocumentData *_document = nullptr;
-	PhotoData *_photo = nullptr;
-	Media::Clip::ReaderPointer _gif;
-
-	int _emojiSize;
-	std::vector<not_null<EmojiPtr>> _emojiList;
-
-	void clipCallback(Media::Clip::Notification notification);
-
-	enum CacheStatus {
-		CacheNotLoaded,
-		CacheThumbLoaded,
-		CacheLoaded,
-	};
-	mutable CacheStatus _cacheStatus = CacheNotLoaded;
-	mutable QPixmap _cache;
-	mutable QSize _cachedSize;
-
-};
-
-template <typename BoxType, typename ...Args>
+template <typename BoxType = GenericBox, typename ...Args>
 inline object_ptr<BoxType> Box(Args&&... args) {
-	auto parent = static_cast<QWidget*>(nullptr);
+	const auto parent = static_cast<QWidget*>(nullptr);
 	return object_ptr<BoxType>(parent, std::forward<Args>(args)...);
 }

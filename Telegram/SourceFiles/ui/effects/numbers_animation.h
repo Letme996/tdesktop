@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "ui/rp_widget.h"
+#include "ui/effects/animations.h"
 
 namespace style {
 struct FlatLabel;
@@ -25,10 +26,9 @@ public:
 		_widthChangedCallback = std::move(callback);
 	}
 	void setText(const QString &text, int value);
-	void stepAnimation(TimeMs ms);
 	void finishAnimating();
 
-	void paint(Painter &p, int x, int y, int outerWidth);
+	void paint(QPainter &p, int x, int y, int outerWidth);
 	int countWidth() const;
 	int maxWidth() const;
 
@@ -51,7 +51,7 @@ private:
 	int _fromWidth = 0;
 	int _toWidth = 0;
 
-	Animation _a_ready;
+	Ui::Animations::Simple _a_ready;
 	QString _delayedText;
 	int _delayedValue = 0;
 
@@ -64,6 +64,10 @@ private:
 };
 
 struct StringWithNumbers {
+	static StringWithNumbers FromString(const QString &text) {
+		return { text };
+	}
+
 	QString text;
 	int offset = -1;
 	int length = 0;
@@ -99,33 +103,8 @@ private:
 	NumbersAnimation _numbers;
 	int _beforeWidth = 0;
 	int _afterWidth = 0;
-	Animation _beforeWidthAnimation;
+	Ui::Animations::Simple _beforeWidthAnimation;
 
 };
 
 } // namespace Ui
-
-namespace Lang {
-
-template <typename ResultString>
-struct StartReplacements;
-
-template <>
-struct StartReplacements<Ui::StringWithNumbers> {
-	static inline Ui::StringWithNumbers Call(QString &&langString) {
-		return { std::move(langString) };
-	}
-};
-
-template <typename ResultString>
-struct ReplaceTag;
-
-template <>
-struct ReplaceTag<Ui::StringWithNumbers> {
-	static Ui::StringWithNumbers Call(
-		Ui::StringWithNumbers &&original,
-		ushort tag,
-		const Ui::StringWithNumbers &replacement);
-};
-
-} // namespace Lang

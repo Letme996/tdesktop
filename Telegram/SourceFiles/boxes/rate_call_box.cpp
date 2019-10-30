@@ -15,7 +15,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/input_fields.h"
 #include "mainwindow.h"
-#include "mainwidget.h"
+#include "main/main_session.h"
+#include "apiwrap.h"
 
 namespace {
 
@@ -24,17 +25,22 @@ constexpr auto kRateCallCommentLengthMax = 200;
 
 } // namespace
 
-RateCallBox::RateCallBox(QWidget*, uint64 callId, uint64 callAccessHash)
-: _callId(callId)
+RateCallBox::RateCallBox(
+	QWidget*,
+	not_null<Main::Session*> session,
+	uint64 callId,
+	uint64 callAccessHash)
+: _session(session)
+, _callId(callId)
 , _callAccessHash(callAccessHash) {
 }
 
 void RateCallBox::prepare() {
-	setTitle(langFactory(lng_call_rate_label));
-	addButton(langFactory(lng_cancel), [this] { closeBox(); });
+	setTitle(tr::lng_call_rate_label());
+	addButton(tr::lng_cancel(), [this] { closeBox(); });
 
 	for (auto i = 0; i < kMaxRating; ++i) {
-		_stars.push_back(object_ptr<Ui::IconButton>(this, st::callRatingStar));
+		_stars.emplace_back(this, st::callRatingStar);
 		_stars.back()->setClickedCallback([this, value = i + 1] { ratingChanged(value); });
 		_stars.back()->show();
 	}
@@ -61,8 +67,8 @@ void RateCallBox::ratingChanged(int value) {
 	Expects(value > 0 && value <= kMaxRating);
 	if (!_rating) {
 		clearButtons();
-		addButton(langFactory(lng_send_button), [this] { send(); });
-		addButton(langFactory(lng_cancel), [this] { closeBox(); });
+		addButton(tr::lng_send_button(), [this] { send(); });
+		addButton(tr::lng_cancel(), [this] { closeBox(); });
 	}
 	_rating = value;
 
@@ -76,7 +82,7 @@ void RateCallBox::ratingChanged(int value) {
 				this,
 				st::callRatingComment,
 				Ui::InputField::Mode::MultiLine,
-				langFactory(lng_call_rate_comment));
+				tr::lng_call_rate_comment());
 			_comment->show();
 			_comment->setSubmitSettings(Ui::InputField::SubmitSettings::Both);
 			_comment->setMaxLength(kRateCallCommentLengthMax);
@@ -114,10 +120,15 @@ void RateCallBox::send() {
 		return;
 	}
 	auto comment = _comment ? _comment->getLastText().trimmed() : QString();
-	_requestId = request(MTPphone_SetCallRating(MTP_inputPhoneCall(MTP_long(_callId), MTP_long(_callAccessHash)), MTP_int(_rating), MTP_string(comment))).done([this](const MTPUpdates &updates) {
-		App::main()->sentUpdatesReceived(updates);
+	_requestId = request(MTPphone_SetCallRating(
+		MTP_flags(0),
+		MTP_inputPhoneCall(MTP_long(_callId), MTP_long(_callAccessHash)),
+		MTP_int(_rating),
+		MTP_string(comment)
+	)).done([=](const MTPUpdates &updates) {
+		_session->api().applyUpdates(updates);
 		closeBox();
-	}).fail([this](const RPCError &error) { closeBox(); }).send();
+	}).fail([=](const RPCError &error) { closeBox(); }).send();
 }
 
 void RateCallBox::updateMaxHeight() {

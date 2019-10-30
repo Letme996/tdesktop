@@ -7,15 +7,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "platform/platform_specific.h"
 #include "platform/mac/specific_mac_p.h"
+
+namespace Data {
+class LocationPoint;
+} // namespace Data
 
 namespace Platform {
 
-inline bool TranslucentWindowsSupported(QPoint globalPosition) {
-	return true;
-}
-
 QString CurrentExecutablePath(int argc, char *argv[]);
+
+void RemoveQuarantine(const QString &path);
 
 namespace ThirdParty {
 
@@ -46,34 +49,23 @@ void psWriteDump();
 
 void psDeleteDir(const QString &dir);
 
-void psUserActionDone();
-bool psIdleSupported();
-TimeMs psIdleTime();
-
 QStringList psInitLogs();
 void psClearInitLogs();
 
 void psActivateProcess(uint64 pid = 0);
 QString psLocalServerPrefix();
 QString psAppDataPath();
-QString psDownloadPath();
 void psAutoStart(bool start, bool silent = false);
 void psSendToMenu(bool send, bool silent = false);
 
 QRect psDesktopRect();
-void psShowOverAll(QWidget *w, bool canFocus = true);
-void psBringToBack(QWidget *w);
 
 int psCleanup();
 int psFixPrevious();
 
 bool psShowOpenWithMenu(int x, int y, const QString &file);
 
-QAbstractNativeEventFilter *psNativeEventFilter();
-
 void psNewVersion();
-
-void psUpdateOverlayed(QWidget *widget);
 
 void psDownloadPathEnableAccess();
 QByteArray psDownloadPathBookmark(const QString &path);
@@ -111,4 +103,4 @@ QString strStyleOfInterface();
 QString strTitleWrapClass();
 QString strTitleClass();
 
-bool psLaunchMaps(const LocationCoords &coords);
+bool psLaunchMaps(const Data::LocationPoint &point);

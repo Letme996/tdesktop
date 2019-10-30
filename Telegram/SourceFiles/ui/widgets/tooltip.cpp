@@ -7,21 +7,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/widgets/tooltip.h"
 
-#include "mainwindow.h"
+#include "ui/ui_utility.h"
+#include "ui/platform/ui_platform_utility.h"
+#include "base/invoke_queued.h"
 #include "styles/style_widgets.h"
-#include "platform/platform_specific.h"
+
+#include <QtWidgets/QApplication>
+#include <QtWidgets/QDesktopWidget>
 
 namespace Ui {
 
 Tooltip *TooltipInstance = nullptr;
-
-bool AbstractTooltipShower::tooltipWindowActive() const {
-	if (auto window = App::wnd()) {
-		window->updateIsActive(0);
-		return window->isActive();
-	}
-	return false;
-}
 
 const style::Tooltip *AbstractTooltipShower::tooltipSt() const {
 	return &st::defaultTooltip;
@@ -33,7 +29,7 @@ AbstractTooltipShower::~AbstractTooltipShower() {
 	}
 }
 
-Tooltip::Tooltip() : TWidget(nullptr) {
+Tooltip::Tooltip() : RpWidget(nullptr) {
 	TooltipInstance = this;
 
 	setWindowFlags(Qt::WindowFlags(Qt::FramelessWindowHint) | Qt::BypassWindowManagerHint | Qt::NoDropShadowWindowHint | Qt::ToolTip);
@@ -42,24 +38,18 @@ Tooltip::Tooltip() : TWidget(nullptr) {
 
 	_showTimer.setCallback([=] { performShow(); });
 	_hideByLeaveTimer.setCallback([=] { Hide(); });
-
-	connect(App::wnd()->windowHandle(), SIGNAL(activeChanged()), this, SLOT(onWndActiveChanged()));
 }
 
 void Tooltip::performShow() {
 	if (_shower) {
-		auto text = _shower->tooltipWindowActive() ? _shower->tooltipText() : QString();
+		auto text = _shower->tooltipWindowActive()
+			? _shower->tooltipText()
+			: QString();
 		if (text.isEmpty()) {
 			Hide();
 		} else {
 			TooltipInstance->popup(_shower->tooltipPos(), text, _shower->tooltipSt());
 		}
-	}
-}
-
-void Tooltip::onWndActiveChanged() {
-	if (!App::wnd() || !App::wnd()->windowHandle() || !App::wnd()->windowHandle()->isActive()) {
-		Hide();
 	}
 }
 
@@ -73,7 +63,7 @@ bool Tooltip::eventFilter(QObject *o, QEvent *e) {
 			Hide();
 		}
 	}
-	return TWidget::eventFilter(o, e);
+	return RpWidget::eventFilter(o, e);
 }
 
 Tooltip::~Tooltip() {
@@ -90,7 +80,7 @@ void Tooltip::popup(const QPoint &m, const QString &text, const style::Tooltip *
 
 	_point = m;
 	_st = st;
-	_text = Text(_st->textStyle, text, _textPlainOptions, _st->widthMax, true);
+	_text = Text::String(_st->textStyle, text, _textPlainOptions, _st->widthMax, true);
 
 	_useTransparency = Platform::TranslucentWindowsSupported(_point);
 	setAttribute(Qt::WA_OpaquePaintEvent, !_useTransparency);
@@ -111,7 +101,7 @@ void Tooltip::popup(const QPoint &m, const QString &text, const style::Tooltip *
 
 	// count tooltip position
 	QPoint p(m + _st->shift);
-	if (rtl()) {
+	if (style::RightToLeft()) {
 		p.setX(m.x() - s.width() - _st->shift.x());
 	}
 	if (s.width() < 2 * _st->shift.x()) {
@@ -187,7 +177,7 @@ void Tooltip::Hide() {
 		instance->_showTimer.cancel();
 		instance->_hideByLeaveTimer.cancel();
 		instance->hide();
-		InvokeQueued(instance, [instance] { instance->deleteLater(); });
+		InvokeQueued(instance, [=] { instance->deleteLater(); });
 	}
 }
 
@@ -244,12 +234,15 @@ void ImportantTooltip::countApproachSide(RectParts preferSide) {
 	if ((allowedAbove && allowedBelow) || (!allowedAbove && !allowedBelow)) {
 		_side = preferSide;
 	} else {
-		_side = (allowedAbove ? RectPart::Top : RectPart::Bottom) | (preferSide & (RectPart::Left | RectPart::Center | RectPart::Right));
+		_side = (allowedAbove ? RectPart::Top : RectPart::Bottom)
+			| (preferSide & (RectPart::Left | RectPart::Center | RectPart::Right));
 	}
 	if (_useTransparency) {
-		auto arrow = QImage(QSize(_st.arrow * 2, _st.arrow) * cIntRetinaFactor(), QImage::Format_ARGB32_Premultiplied);
+		auto arrow = QImage(
+			QSize(_st.arrow * 2, _st.arrow) * style::DevicePixelRatio(),
+			QImage::Format_ARGB32_Premultiplied);
 		arrow.fill(Qt::transparent);
-		arrow.setDevicePixelRatio(cRetinaFactor());
+		arrow.setDevicePixelRatio(style::DevicePixelRatio());
 		{
 			Painter p(&arrow);
 			PainterHighQualityEnabler hq(p);
@@ -264,7 +257,7 @@ void ImportantTooltip::countApproachSide(RectParts preferSide) {
 		if (_side & RectPart::Bottom) {
 			arrow = std::move(arrow).transformed(QTransform(1, 0, 0, -1, 0, 0));
 		}
-		_arrow = App::pixmapFromImageInPlace(std::move(arrow));
+		_arrow = PixmapFromImage(std::move(arrow));
 	}
 }
 
@@ -286,7 +279,7 @@ void ImportantTooltip::toggleAnimated(bool visible) {
 	}
 }
 
-void ImportantTooltip::hideAfter(TimeMs timeout) {
+void ImportantTooltip::hideAfter(crl::time timeout) {
 	_hideTimer.callOnce(timeout);
 }
 
@@ -312,7 +305,7 @@ void ImportantTooltip::toggleFast(bool visible) {
 		setVisible(_visible);
 	}
 	if (_visibleAnimation.animating() || _visible != visible) {
-		_visibleAnimation.finish();
+		_visibleAnimation.stop();
 		_visible = visible;
 		checkAnimationFinish();
 	}
@@ -347,7 +340,7 @@ void ImportantTooltip::updateGeometry() {
 	accumulate_min(left, areaMiddle - _st.arrow - _st.arrowSkipMin);
 
 	auto countTop = [this] {
-		auto shift = anim::interpolate(_st.shift, 0, _visibleAnimation.current(_visible ? 1. : 0.));
+		auto shift = anim::interpolate(_st.shift, 0, _visibleAnimation.value(_visible ? 1. : 0.));
 		if (_side & RectPart::Top) {
 			return _area.y() - height() - shift;
 		}
@@ -375,7 +368,7 @@ void ImportantTooltip::paintEvent(QPaintEvent *e) {
 	auto inner = countInner();
 	if (_useTransparency) {
 		if (!_cache.isNull()) {
-			auto opacity = _visibleAnimation.current(_visible ? 1. : 0.);
+			auto opacity = _visibleAnimation.value(_visible ? 1. : 0.);
 			p.setOpacity(opacity);
 			p.drawPixmap(0, 0, _cache);
 		} else {

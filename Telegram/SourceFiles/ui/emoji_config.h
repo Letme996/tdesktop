@@ -7,19 +7,50 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "base/basic_types.h"
 #include "base/binary_guard.h"
 #include "emoji.h"
 
+#include <QtGui/QPainter>
+#include <QtGui/QPixmap>
+
+#include <rpl/producer.h>
+
 namespace Ui {
 namespace Emoji {
+namespace internal {
 
-constexpr auto kRecentLimit = 42;
+[[nodiscard]] QString CacheFileFolder();
+[[nodiscard]] QString SetDataPath(int id);
+
+} // namespace internal
 
 void Init();
 void Clear();
 
+void ClearIrrelevantCache();
+
+struct Set {
+	int id = 0;
+	int postId = 0;
+	int size = 0;
+	QString name;
+	QString previewPath;
+};
+
+// Thread safe, callback is called on main thread.
+void SwitchToSet(int id, Fn<void(bool)> callback);
+
+std::vector<Set> Sets();
+int CurrentSetId();
+bool SetIsReady(int id);
+rpl::producer<> Updated();
+
 int GetSizeNormal();
 int GetSizeLarge();
+#if defined Q_OS_MAC && !defined OS_MAC_OLD
+int GetSizeTouchbar();
+#endif
 
 class One {
 	struct CreationTag {
@@ -78,7 +109,7 @@ public:
 	}
 
 	QString toUrl() const {
-		return qsl("emoji://e.") + QString::number(index());
+		return "emoji://e." + QString::number(index());
 	}
 
 private:
@@ -129,30 +160,33 @@ inline int ColorIndexFromOldKey(uint64 oldKey) {
 	return ColorIndexFromCode(uint32(oldKey & 0xFFFFFFFFLLU));
 }
 
-void ReplaceInText(TextWithEntities &result);
-RecentEmojiPack &GetRecent();
-void AddRecent(EmojiPtr emoji);
+QVector<EmojiPtr> GetDefaultRecent();
 
 const QPixmap &SinglePixmap(EmojiPtr emoji, int fontHeight);
 void Draw(QPainter &p, EmojiPtr emoji, int size, int x, int y);
 
-class Instance {
+class UniversalImages {
 public:
-	explicit Instance(int size);
+	explicit UniversalImages(int id);
 
-	bool cached() const;
-	void draw(QPainter &p, EmojiPtr emoji, int x, int y);
+	int id() const;
+	bool ensureLoaded();
+	void clear();
+
+	void draw(QPainter &p, EmojiPtr emoji, int size, int x, int y) const;
+
+	// This method must be thread safe and so it is called after
+	// the _id value is fixed and all _sprites are loaded.
+	QImage generate(int size, int index) const;
 
 private:
-	void readCache();
-	void generateCache();
-	void pushSprite(QImage &&data);
-
-	int _size = 0;
-	std::vector<QPixmap> _sprites;
-	base::binary_guard _generating;
+	const int _id = 0;
+	std::vector<QImage> _sprites;
 
 };
+
+const std::shared_ptr<UniversalImages> &SourceImages();
+void ClearSourceImages(const std::shared_ptr<UniversalImages> &images);
 
 } // namespace Emoji
 } // namespace Ui

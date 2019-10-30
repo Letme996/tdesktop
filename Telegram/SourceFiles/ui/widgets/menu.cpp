@@ -9,22 +9,36 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "ui/effects/ripple_animation.h"
 #include "ui/widgets/checkbox.h"
+#include "ui/text/text.h"
+
+#include <QtGui/QtEvents>
 
 namespace Ui {
 
-Menu::ActionData::~ActionData() = default;
+struct Menu::ActionData {
+	Text::String text;
+	QString shortcut;
+	const style::icon *icon = nullptr;
+	const style::icon *iconOver = nullptr;
+	std::unique_ptr<RippleAnimation> ripple;
+	std::unique_ptr<ToggleView> toggle;
+	int textWidth = 0;
+	bool hasSubmenu = false;
+};
 
-Menu::Menu(QWidget *parent, const style::Menu &st) : TWidget(parent)
+Menu::Menu(QWidget *parent, const style::Menu &st)
+: RpWidget(parent)
 , _st(st)
-, _itemHeight(_st.itemPadding.top() + _st.itemFont->height + _st.itemPadding.bottom())
+, _itemHeight(_st.itemPadding.top() + _st.itemStyle.font->height + _st.itemPadding.bottom())
 , _separatorHeight(_st.separatorPadding.top() + _st.separatorWidth + _st.separatorPadding.bottom()) {
 	init();
 }
 
-Menu::Menu(QWidget *parent, QMenu *menu, const style::Menu &st) : TWidget(parent)
+Menu::Menu(QWidget *parent, QMenu *menu, const style::Menu &st)
+: RpWidget(parent)
 , _st(st)
 , _wappedMenu(menu)
-, _itemHeight(_st.itemPadding.top() + _st.itemFont->height + _st.itemPadding.bottom())
+, _itemHeight(_st.itemPadding.top() + _st.itemStyle.font->height + _st.itemPadding.bottom())
 , _separatorHeight(_st.separatorPadding.top() + _st.separatorWidth + _st.separatorPadding.bottom()) {
 	init();
 
@@ -35,6 +49,8 @@ Menu::Menu(QWidget *parent, QMenu *menu, const style::Menu &st) : TWidget(parent
 	_wappedMenu->hide();
 }
 
+Menu::~Menu() = default;
+
 void Menu::init() {
 	resize(_forceWidth ? _forceWidth : _st.widthMin, _st.skip * 2);
 
@@ -43,30 +59,30 @@ void Menu::init() {
 	setAttribute(Qt::WA_OpaquePaintEvent);
 }
 
-QAction *Menu::addAction(const QString &text, const QObject *receiver, const char* member, const style::icon *icon, const style::icon *iconOver) {
-	auto action = addAction(new QAction(text, this), icon, iconOver);
+not_null<QAction*> Menu::addAction(const QString &text, const QObject *receiver, const char* member, const style::icon *icon, const style::icon *iconOver) {
+	const auto action = addAction(new QAction(text, this), icon, iconOver);
 	connect(action, SIGNAL(triggered(bool)), receiver, member, Qt::QueuedConnection);
 	return action;
 }
 
-QAction *Menu::addAction(const QString &text, Fn<void()> callback, const style::icon *icon, const style::icon *iconOver) {
-	auto action = addAction(new QAction(text, this), icon, iconOver);
+not_null<QAction*> Menu::addAction(const QString &text, Fn<void()> callback, const style::icon *icon, const style::icon *iconOver) {
+	const auto action = addAction(new QAction(text, this), icon, iconOver);
 	connect(action, &QAction::triggered, action, std::move(callback), Qt::QueuedConnection);
 	return action;
 }
 
-QAction *Menu::addAction(QAction *action, const style::icon *icon, const style::icon *iconOver) {
-	connect(action, SIGNAL(changed()), this, SLOT(actionChanged()));
-	_actions.push_back(action);
-
-	auto createData = [icon, iconOver, action] {
+not_null<QAction*> Menu::addAction(not_null<QAction*> action, const style::icon *icon, const style::icon *iconOver) {
+	connect(action, &QAction::changed, this, [=] {
+		actionChanged();
+	});
+	_actions.emplace_back(action);
+	_actionsData.push_back([&] {
 		auto data = ActionData();
 		data.icon = icon;
 		data.iconOver = iconOver ? iconOver : icon;
 		data.hasSubmenu = (action->menu() != nullptr);
 		return data;
-	};
-	_actionsData.push_back(createData());
+	}());
 
 	auto newWidth = qMax(width(), _st.widthMin);
 	newWidth = processAction(action, _actions.size() - 1, newWidth);
@@ -81,8 +97,8 @@ QAction *Menu::addAction(QAction *action, const style::icon *icon, const style::
 	return action;
 }
 
-QAction *Menu::addSeparator() {
-	auto separator = new QAction(this);
+not_null<QAction*> Menu::addSeparator() {
+	const auto separator = new QAction(this);
 	separator->setSeparator(true);
 	return addAction(separator);
 }
@@ -113,20 +129,22 @@ void Menu::finishAnimating() {
 	}
 }
 
-int Menu::processAction(QAction *action, int index, int width) {
+int Menu::processAction(not_null<QAction*> action, int index, int width) {
 	auto &data = _actionsData[index];
 	if (action->isSeparator() || action->text().isEmpty()) {
-		data.text = data.shortcut = QString();
+		data.shortcut = QString();
+		data.text.clear();
 	} else {
 		auto actionTextParts = action->text().split('\t');
 		auto actionText = actionTextParts.empty() ? QString() : actionTextParts[0];
 		auto actionShortcut = (actionTextParts.size() > 1) ? actionTextParts[1] : QString();
-		int textw = _st.itemFont->width(actionText);
+		data.text.setText(_st.itemStyle, actionText);
+		const auto textw = data.text.maxWidth();
 		int goodw = _st.itemPadding.left() + textw + _st.itemPadding.right();
 		if (data.hasSubmenu) {
 			goodw += _st.itemPadding.right() + _st.arrow.width();
 		} else if (!actionShortcut.isEmpty()) {
-			goodw += _st.itemPadding.right() + _st.itemFont->width(actionShortcut);
+			goodw += _st.itemPadding.right() + _st.itemStyle.font->width(actionShortcut);
 		}
 		if (action->isCheckable()) {
 			auto updateCallback = [this, index] { updateItem(index); };
@@ -140,8 +158,8 @@ int Menu::processAction(QAction *action, int index, int width) {
 		} else {
 			data.toggle.reset();
 		}
-		width = snap(goodw, width, _st.widthMax);
-		data.text = (width < goodw) ? _st.itemFont->elided(actionText, width - (goodw - textw)) : actionText;
+		width = std::clamp(goodw, width, _st.widthMax);
+		data.textWidth = width - (goodw - textw);
 		data.shortcut = actionShortcut;
 	}
 	return width;
@@ -149,10 +167,10 @@ int Menu::processAction(QAction *action, int index, int width) {
 
 void Menu::setShowSource(TriggeredSource source) {
 	_mouseSelection = (source == TriggeredSource::Mouse);
-	setSelected((source == TriggeredSource::Mouse || _actions.isEmpty()) ? -1 : 0);
+	setSelected((source == TriggeredSource::Mouse || _actions.empty()) ? -1 : 0);
 }
 
-Menu::Actions &Menu::actions() {
+const std::vector<not_null<QAction*>> &Menu::actions() const {
 	return _actions;
 }
 
@@ -163,8 +181,9 @@ void Menu::setForceWidth(int forceWidth) {
 
 void Menu::actionChanged() {
 	auto newWidth = _st.widthMin;
-	for (auto i = 0, count = _actions.size(); i != count; ++i) {
-		newWidth = processAction(_actions[i], i, newWidth);
+	auto index = 0;
+	for (const auto action : _actions) {
+		newWidth = processAction(action, index++, newWidth);
 	}
 	if (newWidth != width() && !_forceWidth) {
 		resize(newWidth, height());
@@ -178,7 +197,6 @@ void Menu::actionChanged() {
 void Menu::paintEvent(QPaintEvent *e) {
 	Painter p(this);
 
-	auto ms = getms();
 	auto clip = e->rect();
 
 	auto topskip = QRect(0, 0, width(), _st.skip);
@@ -188,11 +206,11 @@ void Menu::paintEvent(QPaintEvent *e) {
 
 	int top = _st.skip;
 	p.translate(0, top);
-	p.setFont(_st.itemFont);
-	for (int i = 0, count = _actions.size(); i != count; ++i) {
+	p.setFont(_st.itemStyle.font);
+	for (int i = 0, count = int(_actions.size()); i != count; ++i) {
 		if (clip.top() + clip.height() <= top) break;
 
-		auto action = _actions[i];
+		const auto action = _actions[i];
 		auto &data = _actionsData[i];
 		auto actionHeight = action->isSeparator() ? _separatorHeight : _itemHeight;
 		top += actionHeight;
@@ -205,7 +223,7 @@ void Menu::paintEvent(QPaintEvent *e) {
 				auto selected = ((i == _selected || i == _pressed) && enabled);
 				p.fillRect(0, 0, width(), actionHeight, selected ? _st.itemBgOver : _st.itemBg);
 				if (data.ripple) {
-					data.ripple->paint(p, 0, 0, width(), ms);
+					data.ripple->paint(p, 0, 0, width());
 					if (data.ripple->empty()) {
 						data.ripple.reset();
 					}
@@ -214,7 +232,7 @@ void Menu::paintEvent(QPaintEvent *e) {
 					icon->paint(p, _st.itemIconPosition, width());
 				}
 				p.setPen(selected ? _st.itemFgOver : (enabled ? _st.itemFg : _st.itemFgDisabled));
-				p.drawTextLeft(_st.itemPadding.left(), _st.itemPadding.top(), width(), data.text);
+				data.text.drawLeftElided(p, _st.itemPadding.left(), _st.itemPadding.top(), data.textWidth, width());
 				if (data.hasSubmenu) {
 					const auto left = width() - _st.itemPadding.right() - _st.arrow.width();
 					const auto top = (_itemHeight - _st.arrow.height()) / 2;
@@ -233,7 +251,7 @@ void Menu::paintEvent(QPaintEvent *e) {
 					p.drawTextRight(_st.itemPadding.right(), _st.itemPadding.top(), width(), data.shortcut);
 				} else if (data.toggle) {
 					auto toggleSize = data.toggle->getSize();
-					data.toggle->paint(p, width() - _st.itemPadding.right() - toggleSize.width() + _st.itemToggleShift, (_itemHeight - toggleSize.height()) / 2, width(), ms);
+					data.toggle->paint(p, width() - _st.itemPadding.right() - toggleSize.width() + _st.itemToggleShift, (_itemHeight - toggleSize.height()) / 2, width());
 				}
 			}
 		}
@@ -297,16 +315,18 @@ void Menu::handleKeyPress(int key) {
 		itemPressed(TriggeredSource::Keyboard);
 		return;
 	}
-	if (key == (rtl() ? Qt::Key_Left : Qt::Key_Right)) {
+	if (key == (style::RightToLeft() ? Qt::Key_Left : Qt::Key_Right)) {
 		if (_selected >= 0 && _actionsData[_selected].hasSubmenu) {
 			itemPressed(TriggeredSource::Keyboard);
 			return;
-		} else if (_selected < 0 && !_actions.isEmpty()) {
+		} else if (_selected < 0 && !_actions.empty()) {
 			_mouseSelection = false;
 			setSelected(0);
 		}
 	}
-	if ((key != Qt::Key_Up && key != Qt::Key_Down) || _actions.size() < 1) return;
+	if ((key != Qt::Key_Up && key != Qt::Key_Down) || _actions.empty()) {
+		return;
+	}
 
 	auto delta = (key == Qt::Key_Down ? 1 : -1), start = _selected;
 	if (start < 0 || start >= _actions.size()) {
@@ -368,7 +388,10 @@ void Menu::setSelected(int selected) {
 		updateSelectedItem();
 		if (_activatedCallback) {
 			auto source = _mouseSelection ? TriggeredSource::Mouse : TriggeredSource::Keyboard;
-			_activatedCallback((_selected >= 0) ? _actions[_selected] : nullptr, itemTop(_selected), source);
+			_activatedCallback(
+				(_selected >= 0) ? _actions[_selected].get() : nullptr,
+				itemTop(_selected),
+				source);
 		}
 	}
 }

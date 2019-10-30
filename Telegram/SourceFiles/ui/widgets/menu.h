@@ -7,23 +7,25 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "ui/rp_widget.h"
 #include "styles/style_widgets.h"
+
+#include <QtWidgets/QMenu>
 
 namespace Ui {
 
 class ToggleView;
 class RippleAnimation;
 
-class Menu : public TWidget {
-	Q_OBJECT
-
+class Menu : public RpWidget {
 public:
 	Menu(QWidget *parent, const style::Menu &st = st::defaultMenu);
 	Menu(QWidget *parent, QMenu *menu, const style::Menu &st = st::defaultMenu);
+	~Menu();
 
-	QAction *addAction(const QString &text, const QObject *receiver, const char* member, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
-	QAction *addAction(const QString &text, Fn<void()> callback, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
-	QAction *addSeparator();
+	not_null<QAction*> addAction(const QString &text, const QObject *receiver, const char* member, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
+	not_null<QAction*> addAction(const QString &text, Fn<void()> callback, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
+	not_null<QAction*> addSeparator();
 	void clearActions();
 	void finishAnimating();
 
@@ -39,8 +41,7 @@ public:
 	void setShowSource(TriggeredSource source);
 	void setForceWidth(int forceWidth);
 
-	using Actions = QList<QAction*>;
-	Actions &actions();
+	const std::vector<not_null<QAction*>> &actions() const;
 
 	void setResizedCallback(Fn<void()> callback) {
 		_resizedCallback = std::move(callback);
@@ -82,33 +83,16 @@ protected:
 	void enterEventHook(QEvent *e) override;
 	void leaveEventHook(QEvent *e) override;
 
-private slots:
-	void actionChanged();
-
 private:
-	struct ActionData {
-		ActionData() = default;
-		ActionData(const ActionData &other) = delete;
-		ActionData &operator=(const ActionData &other) = delete;
-		ActionData(ActionData &&other) = default;
-		ActionData &operator=(ActionData &&other) = default;
-		~ActionData();
-
-		bool hasSubmenu = false;
-		QString text;
-		QString shortcut;
-		const style::icon *icon = nullptr;
-		const style::icon *iconOver = nullptr;
-		std::unique_ptr<RippleAnimation> ripple;
-		std::unique_ptr<ToggleView> toggle;
-	};
+	struct ActionData;
 
 	void updateSelected(QPoint globalPosition);
+	void actionChanged();
 	void init();
 
 	// Returns the new width.
-	int processAction(QAction *action, int index, int width);
-	QAction *addAction(QAction *a, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
+	int processAction(not_null<QAction*> action, int index, int width);
+	not_null<QAction*> addAction(not_null<QAction*> action, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
 
 	void setSelected(int selected);
 	void setPressed(int pressed);
@@ -131,7 +115,7 @@ private:
 	Fn<void(QPoint globalPosition)> _mouseReleaseDelegate;
 
 	QMenu *_wappedMenu = nullptr;
-	Actions _actions;
+	std::vector<not_null<QAction*>> _actions;
 	std::vector<ActionData> _actionsData;
 
 	int _forceWidth = 0;

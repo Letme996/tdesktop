@@ -7,9 +7,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/abstract_button.h"
 
+#include "ui/ui_utility.h"
+#include "ui/ui_integration.h"
+
+#include <QtGui/QtEvents>
+
 #include <rpl/filter.h>
 #include <rpl/mappers.h>
-#include "messenger.h"
 
 namespace Ui {
 
@@ -66,23 +70,33 @@ void AbstractButton::mouseMoveEvent(QMouseEvent *e) {
 
 void AbstractButton::mouseReleaseEvent(QMouseEvent *e) {
 	if (_state & StateFlag::Down) {
-		auto was = _state;
+		const auto was = _state;
 		_state &= ~State(StateFlag::Down);
+
+		const auto weak = MakeWeak(this);
 		onStateChanged(was, StateChangeSource::ByPress);
+		if (!weak) {
+			return;
+		}
+
 		if (was & StateFlag::Over) {
-			_modifiers = e->modifiers();
-			auto weak = make_weak(this);
-			if (_clickedCallback) {
-				_clickedCallback();
-			} else {
-				emit clicked();
-			}
-			if (weak) {
-				_clicks.fire(e->button());
-			}
+			clicked(e->modifiers(), e->button());
 		} else {
 			setOver(false, StateChangeSource::ByHover);
 		}
+	}
+}
+
+void AbstractButton::clicked(
+		Qt::KeyboardModifiers modifiers,
+		Qt::MouseButton button) {
+	_modifiers = modifiers;
+	const auto weak = MakeWeak(this);
+	if (const auto callback = _clickedCallback) {
+		callback();
+	}
+	if (weak) {
+		_clicks.fire_copy(button);
 	}
 }
 
@@ -97,12 +111,12 @@ void AbstractButton::setOver(bool over, StateChangeSource source) {
 	if (over && !(_state & StateFlag::Over)) {
 		auto was = _state;
 		_state |= StateFlag::Over;
-		Messenger::Instance().registerLeaveSubscription(this);
+		Integration::Instance().registerLeaveSubscription(this);
 		onStateChanged(was, source);
 	} else if (!over && (_state & StateFlag::Over)) {
 		auto was = _state;
 		_state &= ~State(StateFlag::Over);
-		Messenger::Instance().unregisterLeaveSubscription(this);
+		Integration::Instance().unregisterLeaveSubscription(this);
 		onStateChanged(was, source);
 	}
 	updateCursor();

@@ -9,8 +9,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "base/type_traits.h"
 #include "base/observer.h"
+#include "ui/effects/animation_value.h"
 
-class BoxContent;
+class History;
+
+namespace Data {
+struct FileOrigin;
+} // namespace Data
 
 namespace Dialogs {
 enum class Mode;
@@ -46,7 +51,7 @@ inline void CallDelayed(int duration, Guard &&object, Lambda &&lambda) {
 }
 
 template <typename Guard, typename Lambda>
-inline auto LambdaDelayed(int duration, Guard &&object, Lambda &&lambda) {
+[[nodiscard]] inline auto LambdaDelayed(int duration, Guard &&object, Lambda &&lambda) {
 	auto guarded = crl::guard(
 		std::forward<Guard>(object),
 		std::forward<Lambda>(lambda));
@@ -67,69 +72,22 @@ void activateBotCommand(
 	int row,
 	int column);
 void searchByHashtag(const QString &tag, PeerData *inPeer);
-void openPeerByName(
-	const QString &username,
-	MsgId msgId = ShowAtUnreadMsgId,
-	const QString &startToken = QString());
-void joinGroupByHash(const QString &hash);
 void showSettings();
-
-void activateClickHandler(ClickHandlerPtr handler, ClickContext context);
-void activateClickHandler(ClickHandlerPtr handler, Qt::MouseButton button);
 
 } // namespace App
 
-
-enum class LayerOption {
-	CloseOther = (1 << 0),
-	KeepOther = (1 << 1),
-	ShowAfterOther = (1 << 2),
-};
-using LayerOptions = base::flags<LayerOption>;
-inline constexpr auto is_flag_type(LayerOption) { return true; };
-
 namespace Ui {
-namespace internal {
 
-void showBox(
-	object_ptr<BoxContent> content,
-	LayerOptions options,
-	anim::type animated);
-
-} // namespace internal
-
-void showMediaPreview(
-	Data::FileOrigin origin,
-	not_null<DocumentData*> document);
-void showMediaPreview(Data::FileOrigin origin, not_null<PhotoData*> photo);
-void hideMediaPreview();
-
-template <typename BoxType>
-QPointer<BoxType> show(
-		object_ptr<BoxType> content,
-		LayerOptions options = LayerOption::CloseOther,
-		anim::type animated = anim::type::normal) {
-	auto result = QPointer<BoxType>(content.data());
-	internal::showBox(std::move(content), options, animated);
-	return result;
-}
-
-void hideLayer(anim::type animated = anim::type::normal);
-void hideSettingsAndLayer(anim::type animated = anim::type::normal);
-bool isLayerShown();
+// Legacy global methods.
 
 void showPeerProfile(const PeerId &peer);
-inline void showPeerProfile(const PeerData *peer) {
-	showPeerProfile(peer->id);
-}
+void showPeerProfile(const PeerData *peer);
 void showPeerProfile(not_null<const History*> history);
 
 void showPeerHistory(const PeerId &peer, MsgId msgId);
 void showPeerHistoryAtItem(not_null<const HistoryItem*> item);
 
-inline void showPeerHistory(const PeerData *peer, MsgId msgId) {
-	showPeerHistory(peer->id, msgId);
-}
+void showPeerHistory(const PeerData *peer, MsgId msgId);
 void showPeerHistory(not_null<const History*> history, MsgId msgId);
 inline void showChatsList() {
 	showPeerHistory(PeerId(0), 0);
@@ -154,8 +112,6 @@ void inlineBotRequesting(bool requesting);
 void replyMarkupUpdated(const HistoryItem *item);
 void inlineKeyboardMoved(const HistoryItem *item, int oldKeyboardTop, int newKeyboardTop);
 bool switchInlineBotButtonReceived(const QString &query, UserData *samePeerBot = nullptr, MsgId samePeerReplyTo = 0);
-
-void migrateUpdated(PeerData *peer);
 
 void historyMuteUpdated(History *history);
 void unreadCounterUpdated();
@@ -182,26 +138,6 @@ inline bool IsTopCorner(ScreenCorner corner) {
 	Type &Ref##Name();
 #define DeclareVar(Type, Name) DeclareRefVar(Type, Name) \
 	void Set##Name(const Type &Name);
-
-namespace Sandbox {
-
-bool CheckPortableVersionDir();
-void WorkingDirReady();
-void WriteInstallBetaVersionsSetting();
-void WriteDebugModeSetting();
-
-void MainThreadTaskAdded();
-
-void start();
-bool started();
-void finish();
-
-uint64 UserTag();
-
-DeclareVar(QByteArray, LastCrashDump);
-DeclareVar(ProxyData, PreLaunchProxy);
-
-} // namespace Sandbox
 
 namespace Adaptive {
 
@@ -232,7 +168,6 @@ void finish();
 
 DeclareRefVar(SingleQueuedInvokation, HandleUnreadCounterUpdate);
 DeclareRefVar(SingleQueuedInvokation, HandleDelayedPeerUpdates);
-DeclareRefVar(SingleQueuedInvokation, HandleObservables);
 
 DeclareVar(Adaptive::WindowLayout, AdaptiveWindowLayout);
 DeclareVar(Adaptive::ChatLayout, AdaptiveChatLayout);
@@ -276,6 +211,7 @@ DeclareVar(bool, RevokePrivateInbox);
 DeclareVar(int32, StickersRecentLimit);
 DeclareVar(int32, StickersFavedLimit);
 DeclareVar(int32, PinnedDialogsCountMax);
+DeclareVar(int32, PinnedDialogsInFolderMax);
 DeclareVar(QString, InternalLinksDomain);
 DeclareVar(int32, ChannelsReadMediaPeriod);
 DeclareVar(int32, CallReceiveTimeoutMs);
@@ -292,22 +228,15 @@ DeclareRefVar(base::Observable<void>, PhoneCallsEnabledChanged);
 typedef QMap<PeerId, MsgId> HiddenPinnedMessagesMap;
 DeclareVar(HiddenPinnedMessagesMap, HiddenPinnedMessages);
 
-typedef QMap<uint64, QPixmap> CircleMasksMap;
-DeclareRefVar(CircleMasksMap, CircleMasks);
-
 DeclareVar(bool, AskDownloadPath);
 DeclareVar(QString, DownloadPath);
 DeclareVar(QByteArray, DownloadPathBookmark);
 DeclareRefVar(base::Observable<void>, DownloadPathChanged);
 
-DeclareVar(bool, ReplaceEmoji);
-DeclareVar(bool, SuggestEmoji);
-DeclareVar(bool, SuggestStickersByEmoji);
-DeclareRefVar(base::Observable<void>, ReplaceEmojiChanged);
+DeclareVar(bool, VoiceMsgPlaybackDoubled);
 DeclareVar(bool, SoundNotify);
 DeclareVar(bool, DesktopNotify);
 DeclareVar(bool, RestoreSoundNotifyFromTray);
-DeclareVar(bool, IncludeMuted);
 DeclareVar(DBINotifyView, NotifyView);
 DeclareVar(bool, NativeNotifications);
 DeclareVar(int, NotificationsCount);
@@ -317,7 +246,7 @@ DeclareVar(bool, NotificationsDemoIsShown);
 DeclareVar(bool, TryIPv6);
 DeclareVar(std::vector<ProxyData>, ProxiesList);
 DeclareVar(ProxyData, SelectedProxy);
-DeclareVar(bool, UseProxy);
+DeclareVar(ProxyData::Settings, ProxySettings);
 DeclareVar(bool, UseProxyForCalls);
 DeclareRefVar(base::Observable<void>, ConnectionTypeChanged);
 
@@ -330,7 +259,11 @@ DeclareRefVar(base::Variable<DBIWorkMode>, WorkMode);
 DeclareRefVar(base::Observable<void>, UnreadCounterUpdate);
 DeclareRefVar(base::Observable<void>, PeerChooseCancel);
 
-rpl::producer<bool> ReplaceEmojiValue();
+DeclareVar(QString, CallOutputDeviceID);
+DeclareVar(QString, CallInputDeviceID);
+DeclareVar(int, CallOutputVolume);
+DeclareVar(int, CallInputVolume);
+DeclareVar(bool, CallAudioDuckingEnabled);
 
 } // namespace Global
 

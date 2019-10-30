@@ -8,12 +8,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "ui/rp_widget.h"
+#include "base/object_ptr.h"
 
 namespace Ui {
 
 class VerticalLayout : public RpWidget {
 public:
 	using RpWidget::RpWidget;
+
+	int count() const {
+		return _rows.size();
+	}
 
 	template <
 		typename Widget,
@@ -36,7 +41,7 @@ public:
 	Widget *add(
 			object_ptr<Widget> &&child,
 			const style::margins &margin = style::margins()) {
-		return insert(_rows.size(), std::move(child), margin);
+		return insert(count(), std::move(child), margin);
 	}
 
 	QMargins getMargins() const override;

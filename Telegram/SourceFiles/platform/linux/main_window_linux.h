@@ -9,13 +9,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "platform/platform_main_window.h"
 
+#include <QtCore/QTimer>
+
 namespace Platform {
 
 class MainWindow : public Window::MainWindow {
 	Q_OBJECT
 
 public:
-	MainWindow();
+	explicit MainWindow(not_null<Window::Controller*> controller);
 
 	void psFirstShow();
 	void psInitSysMenu();
@@ -59,7 +61,7 @@ private:
 	int _psCheckStatusIconLeft = 100;
 
 	QTimer _psUpdateIndicatorTimer;
-	TimeMs _psLastIndicatorUpdate = 0;
+	crl::time _psLastIndicatorUpdate = 0;
 
 };
 

@@ -9,8 +9,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "export/export_settings.h"
 #include "ui/rp_widget.h"
+#include "base/object_ptr.h"
 
-enum LangKey : int;
+class BoxContent;
 
 namespace Ui {
 class VerticalLayout;
@@ -20,6 +21,9 @@ class ScrollArea;
 
 namespace Export {
 namespace View {
+
+constexpr auto kSizeValueCount = 80;
+int SizeLimitByIndex(int index);
 
 class SettingsWidget : public Ui::RpWidget {
 public:
@@ -52,24 +56,24 @@ private:
 	void setupPathAndFormat(not_null<Ui::VerticalLayout*> container);
 	void addHeader(
 		not_null<Ui::VerticalLayout*> container,
-		LangKey key);
+		const QString &text);
 	not_null<Ui::Checkbox*> addOption(
 		not_null<Ui::VerticalLayout*> container,
-		LangKey key,
+		const QString &text,
 		Types types);
 	not_null<Ui::Checkbox*> addOptionWithAbout(
 		not_null<Ui::VerticalLayout*> container,
-		LangKey key,
+		const QString &text,
 		Types types,
-		LangKey about);
+		const QString &about);
  	void addChatOption(
 		not_null<Ui::VerticalLayout*> container,
-		LangKey key,
+		const QString &text,
 		Types types);
 	void addMediaOptions(not_null<Ui::VerticalLayout*> container);
 	void addMediaOption(
 		not_null<Ui::VerticalLayout*> container,
-		LangKey key,
+		const QString &text,
 		MediaType type);
 	void addSizeSlider(not_null<Ui::VerticalLayout*> container);
 	void addLocationLabel(
@@ -85,7 +89,7 @@ private:
 		TimeId current,
 		TimeId min,
 		TimeId max,
-		LangKey resetLabel,
+		rpl::producer<QString> resetLabel,
 		Fn<void(TimeId)> done);
 
 	const Settings &readData() const;
@@ -99,7 +103,7 @@ private:
 	Settings _internal_data;
 
 	struct Wrap {
-		Wrap(rpl::producer<> value = rpl::never<>())
+		Wrap(rpl::producer<> value = nullptr)
 		: value(std::move(value)) {
 		}
 

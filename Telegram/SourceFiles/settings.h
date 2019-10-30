@@ -7,6 +7,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "ui/style/style_core.h"
+#include "emoji.h"
+
 #define DeclareReadSetting(Type, Name) extern Type g##Name; \
 inline const Type &c##Name() { \
 	return g##Name; \
@@ -22,10 +25,9 @@ inline Type &cRef##Name() { \
 	return g##Name; \
 }
 
-DeclareSetting(bool, Rtl);
 DeclareSetting(Qt::LayoutDirection, LangDir);
 inline bool rtl() {
-	return cRtl();
+	return style::RightToLeft();
 }
 
 DeclareSetting(bool, InstallBetaVersion);
@@ -90,24 +92,10 @@ DeclareSetting(bool, StartToSettings);
 DeclareReadSetting(bool, ManyInstance);
 
 DeclareSetting(QByteArray, LocalSalt);
-DeclareSetting(int, RealScale);
 DeclareSetting(int, ScreenScale);
 DeclareSetting(int, ConfigScale);
 DeclareSetting(QString, TimeFormat);
 
-inline void cChangeTimeFormat(const QString &newFormat) {
-	if (!newFormat.isEmpty()) cSetTimeFormat(newFormat);
-}
-
-namespace Ui {
-namespace Emoji {
-class One;
-} // namespace Emoji
-} // namespace Ui
-
-using EmojiPtr = const Ui::Emoji::One*;
-
-using EmojiPack = QVector<EmojiPtr>;
 using RecentEmojiPreloadOldOld = QVector<QPair<uint32, ushort>>;
 using RecentEmojiPreloadOld = QVector<QPair<uint64, ushort>>;
 using RecentEmojiPreload = QVector<QPair<QString, ushort>>;
@@ -137,11 +125,25 @@ DeclareRefSetting(RecentInlineBots, RecentInlineBots);
 DeclareSetting(bool, PasswordRecovered);
 
 DeclareSetting(int32, PasscodeBadTries);
-DeclareSetting(TimeMs, PasscodeLastTry);
+DeclareSetting(crl::time, PasscodeLastTry);
+
+DeclareSetting(QStringList, SendPaths);
+DeclareSetting(QString, StartUrl);
+
+DeclareSetting(int, OtherOnline);
+
+inline void cChangeTimeFormat(const QString &newFormat) {
+	if (!newFormat.isEmpty()) cSetTimeFormat(newFormat);
+}
+
+RecentEmojiPack &GetRecentEmoji();
+QVector<EmojiPtr> GetRecentEmojiSection();
+void AddRecentEmoji(EmojiPtr emoji);
+[[nodiscard]] rpl::producer<> UpdatedRecentEmoji();
 
 inline bool passcodeCanTry() {
 	if (cPasscodeBadTries() < 3) return true;
-	auto dt = getms(true) - cPasscodeLastTry();
+	auto dt = crl::now() - cPasscodeLastTry();
 	switch (cPasscodeBadTries()) {
 	case 3: return dt >= 5000;
 	case 4: return dt >= 10000;
@@ -152,67 +154,27 @@ inline bool passcodeCanTry() {
 	return dt >= 30000;
 }
 
-DeclareSetting(QStringList, SendPaths);
-DeclareSetting(QString, StartUrl);
+inline float64 cRetinaFactor() {
+	return style::DevicePixelRatio();
+}
 
-DeclareSetting(float64, RetinaFactor);
-DeclareSetting(int32, IntRetinaFactor);
-
-DeclareReadSetting(DBIPlatform, Platform);
-DeclareReadSetting(QString, PlatformString);
-DeclareReadSetting(bool, IsElCapitan);
-DeclareReadSetting(bool, IsSnowLeopard);
-
-DeclareSetting(int, OtherOnline);
-
-class PeerData;
-typedef QMap<PeerData*, QDateTime> SavedPeers;
-typedef QMultiMap<QDateTime, PeerData*> SavedPeersByTime;
-DeclareRefSetting(SavedPeers, SavedPeers);
-DeclareRefSetting(SavedPeersByTime, SavedPeersByTime);
-
-typedef QMap<uint64, DBIPeerReportSpamStatus> ReportSpamStatuses;
-DeclareRefSetting(ReportSpamStatuses, ReportSpamStatuses);
-
-enum DBIAutoDownloadFlags {
-	dbiadNoPrivate = 0x01,
-	dbiadNoGroups  = 0x02,
-};
-
-DeclareSetting(int32, AutoDownloadPhoto);
-DeclareSetting(int32, AutoDownloadAudio);
-DeclareSetting(int32, AutoDownloadGif);
-DeclareSetting(bool, AutoPlayGif);
-
-constexpr auto kInterfaceScaleAuto = 0;
-constexpr auto kInterfaceScaleMin = 100;
-constexpr auto kInterfaceScaleDefault = 100;
-constexpr auto kInterfaceScaleMax = 300;
+inline int32 cIntRetinaFactor() {
+	return style::DevicePixelRatio();
+}
 
 inline int cEvalScale(int scale) {
-	return (scale == kInterfaceScaleAuto) ? cScreenScale() : scale;
+	return (scale == style::kScaleAuto) ? cScreenScale() : scale;
 }
 
 inline int cScale() {
-	return cEvalScale(cRealScale());
-}
-
-template <typename T>
-inline T ConvertScale(T value, int scale) {
-	return (value < 0.)
-		? (-ConvertScale(-value, scale))
-		: T(std::round((float64(value) * scale / 100.) - 0.01));
-}
-
-template <typename T>
-inline T ConvertScale(T value) {
-	return ConvertScale(value, cScale());
+	return style::Scale();
 }
 
 inline void SetScaleChecked(int scale) {
-	const auto checked = (scale == kInterfaceScaleAuto)
-		? kInterfaceScaleAuto
-		: snap(scale, kInterfaceScaleMin, kInterfaceScaleMax / cIntRetinaFactor());
-	cSetConfigScale(checked);
-	cSetRealScale(checked);
+	cSetConfigScale(style::CheckScale(scale));
+}
+
+inline void ValidateScale() {
+	SetScaleChecked(cConfigScale());
+	style::SetScale(cEvalScale(cConfigScale()));
 }

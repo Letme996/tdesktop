@@ -7,10 +7,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/widgets/inner_dropdown.h"
 
-#include "mainwindow.h"
 #include "ui/widgets/scroll_area.h"
 #include "ui/widgets/shadow.h"
 #include "ui/effects/panel_animation.h"
+#include "ui/image/image_prepare.h"
+#include "ui/ui_utility.h"
 
 namespace {
 
@@ -21,25 +22,47 @@ constexpr int kFadeAlphaMax = 160;
 
 namespace Ui {
 
-InnerDropdown::InnerDropdown(QWidget *parent, const style::InnerDropdown &st) : TWidget(parent)
+InnerDropdown::InnerDropdown(
+	QWidget *parent,
+	const style::InnerDropdown &st)
+: RpWidget(parent)
 , _st(st)
+, _roundRect(ImageRoundRadius::Small, _st.bg)
 , _scroll(this, _st.scroll) {
 	_hideTimer.setSingleShot(true);
 	connect(&_hideTimer, SIGNAL(timeout()), this, SLOT(onHideAnimated()));
 
 	connect(_scroll, SIGNAL(scrolled()), this, SLOT(onScroll()));
 
-	if (cPlatform() == dbipMac || cPlatform() == dbipMacOld) {
-		connect(App::wnd()->windowHandle(), SIGNAL(activeChanged()), this, SLOT(onWindowActiveChanged()));
-	}
-
 	hide();
+
+	shownValue(
+	) | rpl::filter([](bool shown) {
+		return shown;
+	}) | rpl::take(1) | rpl::map([=] {
+		// We can't invoke this before the window is created.
+		// So instead we start handling them on the first show().
+		return macWindowDeactivateEvents();
+	}) | rpl::flatten_latest(
+	) | rpl::filter([=] {
+		return !isHidden();
+	}) | rpl::start_with_next([=] {
+		leaveEvent(nullptr);
+	}, lifetime());
 }
 
-QPointer<TWidget> InnerDropdown::doSetOwnedWidget(object_ptr<TWidget> widget) {
-	auto result = QPointer<TWidget>(widget);
-	connect(widget, SIGNAL(heightUpdated()), this, SLOT(onWidgetHeightUpdated()));
-	auto container = _scroll->setOwnedWidget(object_ptr<Container>(_scroll, std::move(widget), _st));
+QPointer<RpWidget> InnerDropdown::doSetOwnedWidget(
+		object_ptr<RpWidget> widget) {
+	auto result = QPointer<RpWidget>(widget);
+	widget->heightValue(
+	) | rpl::skip(1) | rpl::start_with_next([=] {
+		resizeToContent();
+	}, widget->lifetime());
+	auto container = _scroll->setOwnedWidget(
+		object_ptr<Container>(
+			_scroll,
+			std::move(widget),
+			_st));
 	container->resizeToWidth(_scroll->width());
 	container->moveToLeft(0, 0);
 	container->show();
@@ -70,12 +93,6 @@ void InnerDropdown::resizeToContent() {
 	}
 }
 
-void InnerDropdown::onWindowActiveChanged() {
-	if (!App::wnd()->windowHandle()->isActive() && !isHidden()) {
-		leaveEvent(nullptr);
-	}
-}
-
 void InnerDropdown::resizeEvent(QResizeEvent *e) {
 	_scroll->setGeometry(rect().marginsRemoved(_st.padding).marginsRemoved(_st.scrollMargin));
 	if (auto widget = static_cast<TWidget*>(_scroll->widget())) {
@@ -93,18 +110,17 @@ void InnerDropdown::onScroll() {
 }
 
 void InnerDropdown::paintEvent(QPaintEvent *e) {
-	Painter p(this);
+	QPainter p(this);
 
-	auto ms = getms();
-	if (_a_show.animating(ms)) {
-		if (auto opacity = _a_opacity.current(ms, _hiding ? 0. : 1.)) {
+	if (_a_show.animating()) {
+		if (auto opacity = _a_opacity.value(_hiding ? 0. : 1.)) {
 			// _a_opacity.current(ms)->opacityAnimationCallback()->_showAnimation.reset()
 			if (_showAnimation) {
-				_showAnimation->paintFrame(p, 0, 0, width(), _a_show.current(1.), opacity);
+				_showAnimation->paintFrame(p, 0, 0, width(), _a_show.value(1.), opacity);
 			}
 		}
-	} else if (_a_opacity.animating(ms)) {
-		p.setOpacity(_a_opacity.current(0.));
+	} else if (_a_opacity.animating()) {
+		p.setOpacity(_a_opacity.value(0.));
 		p.drawPixmap(0, 0, _cache);
 	} else if (_hiding || isHidden()) {
 		hideFinished();
@@ -114,9 +130,9 @@ void InnerDropdown::paintEvent(QPaintEvent *e) {
 		showChildren();
 	} else {
 		if (!_cache.isNull()) _cache = QPixmap();
-		auto inner = rect().marginsRemoved(_st.padding);
+		const auto inner = rect().marginsRemoved(_st.padding);
 		Shadow::paint(p, inner, width(), _st.shadow);
-		App::roundRect(p, inner, _st.bg, ImageRoundRadius::Small);
+		_roundRect.paint(p, inner);
 	}
 }
 
@@ -124,19 +140,18 @@ void InnerDropdown::enterEventHook(QEvent *e) {
 	if (_autoHiding) {
 		showAnimated(_origin);
 	}
-	return TWidget::enterEventHook(e);
+	return RpWidget::enterEventHook(e);
 }
 
 void InnerDropdown::leaveEventHook(QEvent *e) {
 	if (_autoHiding) {
-		auto ms = getms();
-		if (_a_show.animating(ms) || _a_opacity.animating(ms)) {
+		if (_a_show.animating() || _a_opacity.animating()) {
 			hideAnimated();
 		} else {
 			_hideTimer.start(300);
 		}
 	}
-	return TWidget::leaveEventHook(e);
+	return RpWidget::leaveEventHook(e);
 }
 
 void InnerDropdown::otherEnter() {
@@ -147,8 +162,7 @@ void InnerDropdown::otherEnter() {
 
 void InnerDropdown::otherLeave() {
 	if (_autoHiding) {
-		auto ms = getms();
-		if (_a_show.animating(ms) || _a_opacity.animating(ms)) {
+		if (_a_show.animating() || _a_opacity.animating()) {
 			hideAnimated();
 		} else {
 			_hideTimer.start(0);
@@ -183,7 +197,7 @@ void InnerDropdown::hideAnimated(HideOption option) {
 
 void InnerDropdown::finishAnimating() {
 	if (_a_show.animating()) {
-		_a_show.finish();
+		_a_show.stop();
 		showAnimationCallback();
 	}
 	if (_showAnimation) {
@@ -191,7 +205,7 @@ void InnerDropdown::finishAnimating() {
 		showChildren();
 	}
 	if (_a_opacity.animating()) {
-		_a_opacity.finish();
+		_a_opacity.stop();
 		opacityAnimationCallback();
 	}
 }
@@ -216,7 +230,7 @@ void InnerDropdown::hideFast() {
 }
 
 void InnerDropdown::hideFinished() {
-	_a_show.finish();
+	_a_show.stop();
 	_showAnimation.reset();
 	_cache = QPixmap();
 	_ignoreShowEvents = false;
@@ -280,11 +294,12 @@ void InnerDropdown::startShowAnimation() {
 		auto cache = grabForPanelAnimation();
 		_a_opacity = base::take(opacityAnimation);
 
+		const auto pixelRatio = style::DevicePixelRatio();
 		_showAnimation = std::make_unique<PanelAnimation>(_st.animation, _origin);
 		auto inner = rect().marginsRemoved(_st.padding);
-		_showAnimation->setFinalImage(std::move(cache), QRect(inner.topLeft() * cIntRetinaFactor(), inner.size() * cIntRetinaFactor()));
-		auto corners = App::cornersMask(ImageRoundRadius::Small);
-		_showAnimation->setCornerMasks(corners[0], corners[1], corners[2], corners[3]);
+		_showAnimation->setFinalImage(std::move(cache), QRect(inner.topLeft() * pixelRatio, inner.size() * pixelRatio));
+		_showAnimation->setCornerMasks(
+			Images::CornersMask(ImageRoundRadius::Small));
 		_showAnimation->start();
 	}
 	hideChildren();
@@ -293,15 +308,16 @@ void InnerDropdown::startShowAnimation() {
 
 QImage InnerDropdown::grabForPanelAnimation() {
 	SendPendingMoveResizeEvents(this);
-	auto result = QImage(size() * cIntRetinaFactor(), QImage::Format_ARGB32_Premultiplied);
-	result.setDevicePixelRatio(cRetinaFactor());
+	const auto pixelRatio = style::DevicePixelRatio();
+	auto result = QImage(size() * pixelRatio, QImage::Format_ARGB32_Premultiplied);
+	result.setDevicePixelRatio(pixelRatio);
 	result.fill(Qt::transparent);
 	{
-		Painter p(&result);
-		App::roundRect(p, rect().marginsRemoved(_st.padding), _st.bg, ImageRoundRadius::Small);
-		for (auto child : children()) {
-			if (auto widget = qobject_cast<QWidget*>(child)) {
-				widget->render(&p, widget->pos(), widget->rect(), QWidget::DrawChildren | QWidget::IgnoreMask);
+		QPainter p(&result);
+		_roundRect.paint(p, rect().marginsRemoved(_st.padding));
+		for (const auto child : children()) {
+			if (const auto widget = qobject_cast<QWidget*>(child)) {
+				RenderWidget(p, widget, widget->pos());
 			}
 		}
 	}

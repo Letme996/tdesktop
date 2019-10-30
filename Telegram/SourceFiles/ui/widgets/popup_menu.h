@@ -8,24 +8,26 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "styles/style_widgets.h"
-#include "ui/rp_widget.h"
 #include "ui/widgets/menu.h"
+#include "ui/effects/animations.h"
 #include "ui/effects/panel_animation.h"
+#include "ui/round_rect.h"
+#include "ui/rp_widget.h"
+#include "base/object_ptr.h"
 
 namespace Ui {
 
-class PopupMenu : public Ui::RpWidget, private base::Subscriber {
+class PopupMenu : public RpWidget {
 public:
 	PopupMenu(QWidget *parent, const style::PopupMenu &st = st::defaultPopupMenu);
 	PopupMenu(QWidget *parent, QMenu *menu, const style::PopupMenu &st = st::defaultPopupMenu);
 
-	QAction *addAction(const QString &text, const QObject *receiver, const char* member, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
-	QAction *addAction(const QString &text, Fn<void()> callback, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
-	QAction *addSeparator();
+	not_null<QAction*> addAction(const QString &text, const QObject *receiver, const char* member, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
+	not_null<QAction*> addAction(const QString &text, Fn<void()> callback, const style::icon *icon = nullptr, const style::icon *iconOver = nullptr);
+	not_null<QAction*> addSeparator();
 	void clearActions();
 
-	using Actions = Ui::Menu::Actions;
-	Actions &actions();
+	const std::vector<not_null<QAction*>> &actions() const;
 
 	void deleteOnHide(bool del);
 	void popup(const QPoint &p);
@@ -41,19 +43,12 @@ protected:
 	void paintEvent(QPaintEvent *e) override;
 	void focusOutEvent(QFocusEvent *e) override;
 	void hideEvent(QHideEvent *e) override;
-
-	void keyPressEvent(QKeyEvent *e) override {
-		forwardKeyPress(e->key());
-	}
-	void mouseMoveEvent(QMouseEvent *e) override {
-		forwardMouseMove(e->globalPos());
-	}
-	void mousePressEvent(QMouseEvent *e) override {
-		forwardMousePress(e->globalPos());
-	}
+	void keyPressEvent(QKeyEvent *e) override;
+	void mouseMoveEvent(QMouseEvent *e) override;
+	void mousePressEvent(QMouseEvent *e) override;
 
 private:
-	void paintBg(Painter &p);
+	void paintBg(QPainter &p);
 	void hideFast();
 	void setOrigin(PanelAnimation::Origin origin);
 	void showAnimated(PanelAnimation::Origin origin);
@@ -73,7 +68,7 @@ private:
 	void hideFinished();
 	void showStarted();
 
-	using TriggeredSource = Ui::Menu::TriggeredSource;
+	using TriggeredSource = Menu::TriggeredSource;
 	void handleCompositingUpdate();
 	void handleMenuResize();
 	void handleActivated(QAction *action, int actionTop, TriggeredSource source);
@@ -100,7 +95,8 @@ private:
 
 	const style::PopupMenu &_st;
 
-	object_ptr<Ui::Menu> _menu;
+	RoundRect _roundRect;
+	object_ptr<Menu> _menu;
 
 	using Submenus = QMap<QAction*, SubmenuPointer>;
 	Submenus _submenus;
@@ -114,12 +110,12 @@ private:
 
 	PanelAnimation::Origin _origin = PanelAnimation::Origin::TopLeft;
 	std::unique_ptr<PanelAnimation> _showAnimation;
-	Animation _a_show;
+	Animations::Simple _a_show;
 
 	bool _useTransparency = true;
 	bool _hiding = false;
 	QPixmap _cache;
-	Animation _a_opacity;
+	Animations::Simple _a_opacity;
 
 	bool _deleteOnHide = true;
 	bool _triggering = false;

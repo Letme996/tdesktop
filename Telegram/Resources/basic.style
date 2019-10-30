@@ -72,8 +72,11 @@ linkCropLimit: 360px;
 linkFont: normalFont;
 linkOverFont: font(fsize underline);
 
-dateRadius: 6px;
-buttonRadius: 3px;
+roundRadiusLarge: 6px;
+roundRadiusSmall: 3px;
+
+dateRadius: roundRadiusLarge;
+buttonRadius: roundRadiusSmall;
 
 setLittleSkip: 9px;
 
@@ -92,7 +95,7 @@ msgServiceFont: semiboldFont;
 msgServiceNameFont: semiboldFont;
 msgServicePhotoWidth: 100px;
 msgDateFont: font(13px);
-msgMinWidth: 190px;
+msgMinWidth: 160px;
 msgPhotoSize: 33px;
 msgPhotoSkip: 40px;
 msgPadding: margins(13px, 7px, 13px, 8px);
@@ -243,12 +246,6 @@ dragPadding: margins(20px, 10px, 20px, 10px);
 
 dragHeight: 72px;
 
-minPhotoSize: 100px;
-maxMediaSize: 430px;
-maxStickerSize: 256px;
-maxGifSize: 320px;
-maxSignatureSize: 144px;
-
 radialSize: size(50px, 50px);
 radialLine: 3px;
 radialDuration: 350;
@@ -263,19 +260,6 @@ videoIcon: icon {
 	{ "media_video_play", videoPlayIconFg, point(12px, 12px) },
 };
 locationSize: size(320px, 240px);
-
-webPageLeft: 10px;
-webPageBar: 2px;
-webPageTitleFont: semiboldFont;
-webPageTitleStyle: semiboldTextStyle;
-webPageTitleOutFg: historyTextOutFg;
-webPageTitleInFg: historyTextInFg;
-webPageDescriptionOutFg: historyTextOutFg;
-webPageDescriptionInFg: historyTextInFg;
-webPageDescriptionFont: normalFont;
-webPageDescriptionStyle: defaultTextStyle;
-webPagePhotoSize: 100px;
-webPagePhotoDelta: 8px;
 
 mediaPlayerSuppressDuration: 150;
 
@@ -312,5 +296,8 @@ notifyFadeRight: icon {{ "fade_horizontal", notificationBg }};
 
 stickerIconLeft: icon {{ "fade_horizontal-flip_horizontal", emojiPanCategories }};
 stickerIconRight: icon {{ "fade_horizontal", emojiPanCategories }};
+
+emojiSuggestionsFadeLeft: icon {{ "fade_horizontal-flip_horizontal", boxBg }};
+emojiSuggestionsFadeRight: icon {{ "fade_horizontal", boxBg }};
 
 transparentPlaceholderSize: 4px;

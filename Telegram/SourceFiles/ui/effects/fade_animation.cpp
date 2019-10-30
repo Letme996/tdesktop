@@ -7,6 +7,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "ui/effects/fade_animation.h"
 
+#include "ui/ui_utility.h"
+#include "ui/painter.h"
+#include "app.h"
+
 namespace Ui {
 namespace {
 
@@ -19,11 +23,11 @@ FadeAnimation::FadeAnimation(TWidget *widget, float64 scale)
 , _scale(scale) {
 }
 
-bool FadeAnimation::paint(Painter &p) {
+bool FadeAnimation::paint(QPainter &p) {
 	if (_cache.isNull()) return false;
 
 	const auto cache = _cache;
-	auto opacity = _animation.current(getms(), _visible ? 1. : 0.);
+	auto opacity = _animation.value(_visible ? 1. : 0.);
 	p.setOpacity(opacity);
 	if (_scale < 1.) {
 		PainterHighQualityEnabler hq(p);
@@ -105,7 +109,7 @@ void FadeAnimation::hide() {
 }
 
 void FadeAnimation::stopAnimation() {
-	_animation.finish();
+	_animation.stop();
 	if (!_cache.isNull()) {
 		_cache = QPixmap();
 		if (_finishedCallback) {
@@ -146,12 +150,11 @@ void FadeAnimation::startAnimation(int duration) {
 }
 
 void FadeAnimation::updateCallback() {
-	if (_animation.animating()) {
-		_widget->update();
-		if (_updatedCallback) {
-			_updatedCallback(_animation.current(_visible ? 1. : 0.));
-		}
-	} else {
+	_widget->update();
+	if (_updatedCallback) {
+		_updatedCallback(_animation.value(_visible ? 1. : 0.));
+	}
+	if (!_animation.animating()) {
 		stopAnimation();
 	}
 }

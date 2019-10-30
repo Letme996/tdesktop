@@ -16,25 +16,26 @@ class Track;
 } // namespace Audio
 } // namespace Media
 
-namespace Calls {
+namespace Main {
+class Session;
+} // namespace Main
 
-enum class PeerToPeer {
-	DefaultContacts,
-	DefaultEveryone,
-	Everyone,
-	Contacts,
-	Nobody,
-};
+namespace Calls {
 
 class Panel;
 
-class Instance : private MTP::Sender, private Call::Delegate, private base::Subscriber, public base::has_weak_ptr {
+class Instance
+	: private MTP::Sender
+	, private Call::Delegate
+	, private base::Subscriber
+	, public base::has_weak_ptr {
 public:
-	Instance();
+	explicit Instance(not_null<Main::Session*> session);
 
 	void startOutgoingCall(not_null<UserData*> user);
 	void handleUpdate(const MTPDupdatePhoneCall &update);
 	void showInfoPanel(not_null<Call*> call);
+	Call* currentCall();
 
 	base::Observable<Call*> &currentCallChanged() {
 		return _currentCallChanged;
@@ -67,13 +68,16 @@ private:
 
 	void refreshDhConfig();
 	void refreshServerConfig();
+	bytes::const_span updateDhConfig(const MTPmessages_DhConfig &data);
 
 	bool alreadyInCall();
 	void handleCallUpdate(const MTPPhoneCall &call);
 
+	const not_null<Main::Session*> _session;
+
 	DhConfig _dhConfig;
 
-	TimeMs _lastServerConfigUpdateTime = 0;
+	crl::time _lastServerConfigUpdateTime = 0;
 	mtpRequestId _serverConfigRequestId = 0;
 
 	std::unique_ptr<Call> _currentCall;
@@ -87,7 +91,5 @@ private:
 	std::unique_ptr<Media::Audio::Track> _callBusyTrack;
 
 };
-
-Instance &Current();
 
 } // namespace Calls

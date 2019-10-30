@@ -17,6 +17,7 @@ using uint64 = quint64;
 
 using std::vector;
 using std::map;
+using std::set;
 using std::find;
 using std::make_pair;
 using std::move;
@@ -79,6 +80,12 @@ Replace Replaces[] = {
 	{ { 0xD83DDE32U }, "8o" },
 	{ { 0xD83DDE37U }, ":X" },
 	{ { 0xD83DDE08U }, "}:)" },
+};
+
+InputCategory PostfixRequired = {
+ { 0x2122U, 0xFE0FU, },
+ { 0xA9U, 0xFE0FU, },
+ { 0xAEU, 0xFE0FU, },
 };
 
 using ColorId = uint32;
@@ -951,7 +958,7 @@ InputCategory Category4 = {
  { 0xD83EDD4AU, },
  { 0xD83EDD4BU, },
  { 0xD83CDFBDU, },
- { 0xD83DDEF9U, 0x20U, },
+ { 0xD83DDEF9U, },
  { 0xD83DDEF7U, },
  { 0x26F8U, },
  { 0xD83EDD4CU, },
@@ -1883,7 +1890,50 @@ InputCategory Category7 = {
  { 0xD83CDDFFU, 0xD83CDDFCU, },
 };
 
-std::map<Id, Id> Aliases;
+// Original data has those emoji only with gender symbols.
+// But they should be displayed as emoji even without gender symbols.
+// So we map which gender symbol to use for an emoji without one.
+std::map<InputId, uint32> WithoutGenderAliases = {
+ { { 0xD83EDD26U, }, 0x2642U },
+ { { 0xD83EDD37U, }, 0x2640U },
+ { { 0xD83EDD38U, }, 0x2642U },
+ { { 0xD83EDD3CU, }, 0x2640U },
+ { { 0xD83EDD3DU, }, 0x2642U },
+ { { 0xD83EDD3EU, }, 0x2640U },
+ { { 0xD83EDD39U, }, 0x2642U },
+ { { 0xD83EDDB8U, }, 0x2640U },
+ { { 0xD83EDDB9U, }, 0x2640U },
+ { { 0xD83EDDD6U, }, 0x2642U },
+ { { 0xD83EDDD7U, }, 0x2640U },
+ { { 0xD83EDDD8U, }, 0x2640U },
+ { { 0xD83EDDD9U, }, 0x2640U },
+ { { 0xD83EDDDAU, }, 0x2640U },
+ { { 0xD83EDDDBU, }, 0x2640U },
+ { { 0xD83EDDDCU, }, 0x2642U },
+ { { 0xD83EDDDDU, }, 0x2642U },
+ { { 0xD83EDDDEU, }, 0x2642U },
+ { { 0xD83EDDDFU, }, 0x2642U },
+};
+
+// Some flags are sent as one string, but are rendered as a different too.
+std::map<InputId, InputId> FlagAliases = {
+ { { 0xD83CDDE8U, 0xD83CDDF5U, }, { 0xD83CDDEBU, 0xD83CDDF7U, } },
+ { { 0xD83CDDE7U, 0xD83CDDFBU, }, { 0xD83CDDF3U, 0xD83CDDF4U, } },
+ { { 0xD83CDDE6U, 0xD83CDDE8U, }, { 0xD83CDDF8U, 0xD83CDDEDU, } },
+
+ // This is different flag, but macOS shows that glyph :(
+ { { 0xD83CDDE9U, 0xD83CDDECU, }, { 0xD83CDDEEU, 0xD83CDDF4U, } },
+
+ { { 0xD83CDDF9U, 0xD83CDDE6U, }, { 0xD83CDDF8U, 0xD83CDDEDU, } },
+ { { 0xD83CDDF2U, 0xD83CDDEBU, }, { 0xD83CDDEBU, 0xD83CDDF7U, } },
+ { { 0xD83CDDEAU, 0xD83CDDE6U, }, { 0xD83CDDEAU, 0xD83CDDF8U, } },
+};
+
+std::map<Id, std::vector<Id>> Aliases; // original -> list of aliased
+
+void AddAlias(const Id &original, const Id &aliased) {
+	Aliases[original].push_back(aliased);
+}
 
 constexpr auto kErrorBadData = 401;
 
@@ -1904,36 +1954,47 @@ Id BareIdFromInput(const InputId &id) {
 	return result;
 }
 
-using VariatedIds = map<Id, bool>;
-VariatedIds fillVariatedIds() {
-	auto result = VariatedIds();
-	for (auto &row : ColoredEmoji) {
+set<Id> fillVariatedIds() {
+	auto result = set<Id>();
+	for (const auto &row : ColoredEmoji) {
 		auto variatedId = Id();
 		if (row.size() < 2) {
 			logDataError() << "colored string should have at least two characters.";
-			return VariatedIds();
+			return {};
 		}
 		for (auto i = size_t(0), size = row.size(); i != size; ++i) {
 			auto code = row[i];
 			if (i == 1) {
 				if (code != ColorMask) {
 					logDataError() << "color code should appear at index 1.";
-					return VariatedIds();
+					return {};
 				}
 			} else if (code == ColorMask) {
 				logDataError() << "color code should appear only at index 1.";
-				return VariatedIds();
+				return {};
 			} else if (code != kPostfix) {
 				append(variatedId, code);
 			}
 		}
-		result.insert(make_pair(variatedId, true));
+		result.emplace(variatedId);
 	}
 	return result;
 }
 
-void appendCategory(Data &result, const InputCategory &category, const VariatedIds &variatedIds) {
-	result.categories.push_back(vector<int>());
+set<Id> fillPostfixRequiredIds() {
+	auto result = set<Id>();
+	for (const auto &row : PostfixRequired) {
+		result.emplace(BareIdFromInput(row));
+	}
+	return result;
+}
+
+void appendCategory(
+		Data &result,
+		const InputCategory &category,
+		const set<Id> &variatedIds,
+		const set<Id> &postfixRequiredIds) {
+	result.categories.emplace_back();
 	for (auto &id : category) {
 		auto emoji = Emoji();
 		auto bareId = BareIdFromInput(id);
@@ -1956,13 +2017,24 @@ void appendCategory(Data &result, const InputCategory &category, const VariatedI
 			result = Data();
 			return;
 		}
+
 		auto it = result.map.find(bareId);
 		if (it == result.map.cend()) {
 			const auto index = result.list.size();
 			it = result.map.emplace(bareId, index).first;
 			result.list.push_back(move(emoji));
 			if (const auto a = Aliases.find(bareId); a != end(Aliases)) {
-				result.map.emplace(a->second, index);
+				for (const auto &alias : a->second) {
+					const auto ok = result.map.emplace(alias, index).second;
+					if (!ok) {
+						logDataError() << "some emoji alias already in the map.";
+						result = Data();
+						return;
+					}
+				}
+			}
+			if (postfixRequiredIds.find(bareId) != end(postfixRequiredIds)) {
+				result.postfixRequired.emplace(index);
 			}
 		} else if (result.list[it->second].postfixed != emoji.postfixed) {
 			logDataError() << "same emoji found with different postfixed property.";
@@ -1973,7 +2045,7 @@ void appendCategory(Data &result, const InputCategory &category, const VariatedI
 			result = Data();
 			return;
 		}
-		if (variatedIds.find(bareId) != variatedIds.cend()) {
+		if (variatedIds.find(bareId) != end(variatedIds)) {
 			result.list[it->second].variated = true;
 
 			auto baseId = Id();
@@ -2001,7 +2073,17 @@ void appendCategory(Data &result, const InputCategory &category, const VariatedI
 					it = result.map.emplace(bareColoredId, index).first;
 					result.list.push_back(move(colored));
 					if (const auto a = Aliases.find(bareColoredId); a != end(Aliases)) {
-						result.map.emplace(a->second, index);
+						for (const auto &alias : a->second) {
+							const auto ok = result.map.emplace(alias, index).second;
+							if (!ok) {
+								logDataError() << "some emoji alias already in the map.";
+								result = Data();
+								return;
+							}
+						}
+					}
+					if (postfixRequiredIds.find(bareColoredId) != end(postfixRequiredIds)) {
+						result.postfixRequired.emplace(index);
 					}
 				} else if (result.list[it->second].postfixed != colored.postfixed) {
 					logDataError() << "same emoji found with different postfixed property.";
@@ -2062,7 +2144,7 @@ bool AddItemBeforeItem(const InputId &add, const InputId &before) {
 	return true;
 }
 
-bool CheckOldInCurrent() {
+bool CheckOldInCurrent(std::set<Id> variatedIds) {
 	const auto categories = {
 		&Category1,
 		&Category2,
@@ -2082,28 +2164,47 @@ bool CheckOldInCurrent() {
 		&old::Category7,
 	};
 	const auto genders = { 0x2640U, 0x2642U };
-	const auto addGender = [&](const InputId &was, int index) {
+	const auto addGender = [](const InputId &was, uint32 gender) {
 		auto result = was;
 		result.push_back(0x200DU);
-		result.push_back(*(begin(genders) + index));
+		result.push_back(gender);
 		result.push_back(0xFE0FU);
 		return result;
+	};
+	const auto addGenderByIndex = [&](const InputId &was, int index) {
+		return addGender(was, *(begin(genders) + index));
+	};
+	const auto find = [](
+			const InputCategory &list,
+			const InputId &id) {
+		return (std::find(begin(list), end(list), id) != end(list));
+	};
+	const auto findInMany = [&](
+			auto &&list,
+			const InputId &id) {
+		for (const auto current : list) {
+			if (find(*current, id)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	const auto emplaceColoredAlias = [](const InputId &real, const InputId &alias, uint32_t color) {
+		if (real.size() < 2 || alias.size() < 2 || real[1] != Colors[0] || alias[1] != Colors[0]) {
+			return false;
+		}
+		auto key = real;
+		key[1] = color;
+		auto value = alias;
+		value[1] = color;
+		AddAlias(BareIdFromInput(key), BareIdFromInput(value));
+		return true;
 	};
 	auto result = true;
 	for (auto c = begin(old); c != end(old); ++c) {
 		const auto category = *c;
 		for (auto i = begin(*category); i != end(*category); ++i) {
-			const auto find = [](
-					auto &&list,
-					const InputId &id) {
-				for (const auto current : list) {
-					if (std::find(begin(*current), end(*current), id) != end(*current)) {
-						return true;
-					}
-				}
-				return false;
-			};
-			if (find(categories, *i)) {
+			if (findInMany(categories, *i)) {
 				continue;
 			}
 
@@ -2111,7 +2212,7 @@ bool CheckOldInCurrent() {
 			if (i->back() == 0xFE0FU) {
 				auto other = *i;
 				other.pop_back();
-				if (find(categories, other)) {
+				if (findInMany(categories, other)) {
 					continue;
 				}
 			}
@@ -2120,7 +2221,7 @@ bool CheckOldInCurrent() {
 			if (i->back() != 0xFE0FU) {
 				auto other = *i;
 				other.push_back(0xFE0FU);
-				if (find(categories, other)) {
+				if (findInMany(categories, other)) {
 					continue;
 				}
 			}
@@ -2133,7 +2234,7 @@ bool CheckOldInCurrent() {
 					altered.push_back(0x200DU);
 					altered.push_back(*g);
 					altered.push_back(0xFE0FU);
-					if (find(old, altered)) {
+					if (findInMany(old, altered)) {
 						return int(g - begin(genders));
 					}
 				}
@@ -2151,9 +2252,9 @@ bool CheckOldInCurrent() {
 			}
 
 			const auto genderIndex = (1 - otherGenderIndex);
-			const auto real = addGender(*i, genderIndex);
+			const auto real = addGenderByIndex(*i, genderIndex);
 			const auto bare = BareIdFromInput(real);
-			if (!find(categories, real)) {
+			if (!findInMany(categories, real)) {
 				common::logError(kErrorBadData, "input")
 					<< "Bad data: old emoji (category "
 					<< (c - begin(old))
@@ -2163,21 +2264,12 @@ bool CheckOldInCurrent() {
 					<< genderIndex
 					<< ".";
 				result = false;
-			} else if (Aliases.find(bare) != end(Aliases)) {
-				common::logError(kErrorBadData, "input")
-					<< "Bad data: two aliases for a gendered emoji.";
-				result = false;
 			} else {
-				Aliases.emplace(bare, BareIdFromInput(*i));
+				AddAlias(bare, BareIdFromInput(*i));
 			}
 		}
 	}
 	for (auto i = begin(old::ColoredEmoji); i != end(old::ColoredEmoji); ++i) {
-		const auto find = [](
-				const InputCategory &list,
-				const InputId &id) {
-			return (std::find(begin(list), end(list), id) != end(list));
-		};
 		if (find(ColoredEmoji, *i)) {
 			continue;
 		}
@@ -2204,7 +2296,7 @@ bool CheckOldInCurrent() {
 		}
 
 		const auto genderIndex = (1 - otherGenderIndex);
-		const auto real = addGender(*i, genderIndex);
+		const auto real = addGenderByIndex(*i, genderIndex);
 		const auto bare = BareIdFromInput(real);
 		if (!find(ColoredEmoji, real)) {
 			common::logError(kErrorBadData, "input")
@@ -2215,24 +2307,9 @@ bool CheckOldInCurrent() {
 				<< ".";
 			result = false;
 			continue;
-		} else if (Aliases.find(bare) != end(Aliases)) {
-			common::logError(kErrorBadData, "input")
-				<< "Bad data: two aliases for a gendered emoji.";
-			result = false;
 		} else {
-			const auto emplaceAlias = [&](uint32_t color) {
-				if (real.size() < 2 || i->size() < 2 || real[1] != Colors[0] || (*i)[1] != Colors[0]) {
-					return false;
-				}
-				auto key = real;
-				key[1] = color;
-				auto value = *i;
-				value[1] = color;
-				Aliases.emplace(BareIdFromInput(key), BareIdFromInput(value));
-				return true;
-			};
 			for (const auto color : Colors) {
-				if (!emplaceAlias(color)) {
+				if (!emplaceColoredAlias(real, *i, color)) {
 					common::logError(kErrorBadData, "input")
 						<< "Bad data: bad colored emoji.";
 					result = false;
@@ -2241,6 +2318,50 @@ bool CheckOldInCurrent() {
 			}
 		}
 	}
+
+	for (const auto &entry : WithoutGenderAliases) {
+		const auto &inputId = entry.first;
+		const auto &gender = entry.second;
+		if (findInMany(categories, inputId)) {
+			continue;
+		}
+		const auto real = [&] {
+			auto result = addGender(inputId, gender);
+			if (findInMany(categories, result)) {
+				return result;
+			}
+			result.push_back(kPostfix);
+			return result;
+		}();
+		const auto bare = BareIdFromInput(real);
+		if (!findInMany(categories, real)) {
+			common::logError(kErrorBadData, "input")
+				<< "Bad data: without gender alias not found with gender.";
+			result = false;
+		} else {
+			AddAlias(bare, BareIdFromInput(inputId));
+		}
+		if (variatedIds.find(bare) != variatedIds.end()) {
+			auto colorReal = real;
+			colorReal.insert(colorReal.begin() + 1, Colors[0]);
+			auto colorInput = inputId;
+			colorInput.insert(colorInput.begin() + 1, Colors[0]);
+			for (const auto color : Colors) {
+				if (!emplaceColoredAlias(colorReal, colorInput, color)) {
+					common::logError(kErrorBadData, "input")
+						<< "Bad data: bad colored emoji.";
+					result = false;
+					break;
+				}
+			}
+
+		}
+	}
+
+	for (const auto &[inputId, real] : FlagAliases) {
+		AddAlias(BareIdFromInput(real), BareIdFromInput(inputId));
+	}
+
 	return result;
 }
 
@@ -2253,8 +2374,9 @@ common::LogStream logDataError() {
 Data PrepareData() {
 	Data result;
 
-	auto variatedIds = fillVariatedIds();
-	if (variatedIds.empty()) {
+	const auto variatedIds = fillVariatedIds();
+	const auto postfixRequiredIds = fillPostfixRequiredIds();
+	if (variatedIds.empty() || postfixRequiredIds.empty()) {
 		return Data();
 	}
 
@@ -2263,7 +2385,7 @@ Data PrepareData() {
 		return Data();
 	}
 
-	if (!CheckOldInCurrent()) {
+	if (!CheckOldInCurrent(variatedIds)) {
 		return Data();
 	}
 
@@ -2277,7 +2399,7 @@ Data PrepareData() {
 		&Category7,
 	};
 	for (const auto category : categories) {
-		appendCategory(result, *category, variatedIds);
+		appendCategory(result, *category, variatedIds, postfixRequiredIds);
 		if (result.list.empty()) {
 			return Data();
 		}

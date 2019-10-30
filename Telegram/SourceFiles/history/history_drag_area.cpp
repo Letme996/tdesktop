@@ -7,8 +7,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/history_drag_area.h"
 
-#include "styles/style_chat_helpers.h"
-#include "styles/style_boxes.h"
 #include "boxes/confirm_box.h"
 #include "boxes/sticker_set_box.h"
 #include "inline_bots/inline_bot_result.h"
@@ -17,10 +15,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_widget.h"
 #include "storage/localstorage.h"
 #include "lang/lang_keys.h"
+#include "ui/widgets/shadow.h"
+#include "ui/ui_utility.h"
 #include "mainwindow.h"
 #include "apiwrap.h"
 #include "mainwidget.h"
-#include "ui/widgets/shadow.h"
+#include "app.h"
+#include "styles/style_chat_helpers.h"
+#include "styles/style_boxes.h"
 
 DragArea::DragArea(QWidget *parent) : TWidget(parent) {
 	setMouseTracking(true);
@@ -69,8 +71,7 @@ void DragArea::setText(const QString &text, const QString &subtext) {
 void DragArea::paintEvent(QPaintEvent *e) {
 	Painter p(this);
 
-	auto ms = getms();
-	auto opacity = _a_opacity.current(ms, _hiding ? 0. : 1.);
+	auto opacity = _a_opacity.value(_hiding ? 0. : 1.);
 	if (!_a_opacity.animating() && _hiding) {
 		return;
 	}
@@ -85,7 +86,7 @@ void DragArea::paintEvent(QPaintEvent *e) {
 	Ui::Shadow::paint(p, inner, width(), st::boxRoundShadow);
 	App::roundRect(p, inner, st::boxBg, BoxCorners);
 
-	p.setPen(anim::pen(st::dragColor, st::dragDropColor, _a_in.current(ms, _in ? 1. : 0.)));
+	p.setPen(anim::pen(st::dragColor, st::dragDropColor, _a_in.value(_in ? 1. : 0.)));
 
 	p.setFont(st::dragFont);
 	p.drawText(QRect(0, (height() - st::dragHeight) / 2, width(), st::dragFont->height), _text, QTextOption(style::al_top));
@@ -121,7 +122,7 @@ void DragArea::otherLeave() {
 }
 
 void DragArea::hideFast() {
-	_a_opacity.finish();
+	_a_opacity.stop();
 	hide();
 }
 
@@ -142,7 +143,7 @@ void DragArea::hideStart() {
 void DragArea::hideFinish() {
 	hide();
 	_in = false;
-	_a_in.finish();
+	_a_in.stop();
 }
 
 void DragArea::showStart() {

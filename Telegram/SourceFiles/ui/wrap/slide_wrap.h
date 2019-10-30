@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "ui/effects/animations.h"
 #include "ui/wrap/padding_wrap.h"
 
 namespace Ui {
@@ -62,7 +63,7 @@ private:
 
 	bool _toggled = true;
 	rpl::event_stream<bool> _toggledChanged;
-	Animation _animation;
+	Animations::Simple _animation;
 	int _duration = 0;
 
 };
@@ -126,14 +127,14 @@ inline object_ptr<SlideWrap<>> CreateSlideSkipWidget(
 class MultiSlideTracker {
 public:
 	template <typename Widget>
-	void track(const Ui::SlideWrap<Widget> *wrap) {
+	void track(const SlideWrap<Widget> *wrap) {
 		_widgets.push_back(wrap);
 	}
 
 	rpl::producer<bool> atLeastOneShownValue() const;
 
 private:
-	std::vector<const Ui::SlideWrap<Ui::RpWidget>*> _widgets;
+	std::vector<const SlideWrap<Ui::RpWidget>*> _widgets;
 
 };
 

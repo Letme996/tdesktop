@@ -11,13 +11,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/text/text.h"
 
 namespace InlineBots {
+
 class Result;
 
 namespace Layout {
 
+class ItemBase;
+
 class PaintContext : public PaintContextBase {
 public:
-	PaintContext(TimeMs ms, bool selecting, bool paused, bool lastRow)
+	PaintContext(crl::time ms, bool selecting, bool paused, bool lastRow)
 		: PaintContextBase(ms, selecting)
 		, paused(paused)
 		, lastRow(lastRow) {
@@ -78,7 +81,7 @@ public:
 
 	virtual void preload() const;
 
-	void update();
+	void update() const;
 	void layoutChanged();
 
 	// ClickHandlerHost interface
@@ -95,20 +98,18 @@ public:
 protected:
 	DocumentData *getResultDocument() const;
 	PhotoData *getResultPhoto() const;
-	ImagePtr getResultThumb() const;
+	Image *getResultThumb() const;
 	QPixmap getResultContactAvatar(int width, int height) const;
 	int getResultDuration() const;
 	QString getResultUrl() const;
 	ClickHandlerPtr getResultUrlHandler() const;
-	ClickHandlerPtr getResultContentUrlHandler() const;
+	ClickHandlerPtr getResultPreviewHandler() const;
 	QString getResultThumbLetter() const;
 
 	not_null<Context*> context() const {
 		return _context;
 	}
-	Data::FileOrigin fileOrigin() const {
-		return _context->inlineItemFileOrigin();
-	}
+	Data::FileOrigin fileOrigin() const;
 
 	Result *_result = nullptr;
 	DocumentData *_doc = nullptr;

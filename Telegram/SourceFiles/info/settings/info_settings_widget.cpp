@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/info_memento.h"
 #include "info/info_controller.h"
 #include "settings/settings_common.h"
+#include "ui/ui_utility.h"
 
 namespace Info {
 namespace Settings {
@@ -45,11 +46,10 @@ Widget::Widget(
 , _inner(setInnerWidget(::Settings::CreateSection(
 		_type,
 		this,
-		controller->parentController(),
-		_self))) {
+		controller->parentController()))) {
 	_inner->sectionShowOther(
 	) | rpl::start_with_next([=](Type type) {
-		this->controller()->showSettings(type);
+		controller->showSettings(type);
 	}, _inner->lifetime());
 
 	controller->setCanSaveChanges(_inner->sectionCanSaveChanges());
