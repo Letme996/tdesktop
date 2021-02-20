@@ -10,20 +10,30 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_user.h"
 #include "data/data_channel.h"
 #include "data/data_session.h"
+#include "data/data_changes.h"
+#include "data/data_group_call.h"
 #include "history/history.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
-#include "observer_peer.h"
+#include "api/api_invite_links.h"
 
 namespace {
 
-using UpdateFlag = Notify::PeerUpdate::Flag;
+using UpdateFlag = Data::PeerUpdate::Flag;
 
 } // namespace
 
 ChatData::ChatData(not_null<Data::Session*> owner, PeerId id)
 : PeerData(owner, id)
 , inputChat(MTP_int(bareId())) {
+	_flags.changes(
+	) | rpl::start_with_next([=](const Flags::Change &change) {
+		if (change.diff & MTPDchat::Flag::f_call_not_empty) {
+			if (const auto history = this->owner().historyLoaded(this)) {
+				history->updateChatListEntry();
+			}
+		}
+	}, _lifetime);
 }
 
 void ChatData::setPhoto(const MTPChatPhoto &photo) {
@@ -38,13 +48,17 @@ void ChatData::setPhoto(PhotoId photoId, const MTPChatPhoto &photo) {
 	});
 }
 
-auto ChatData::DefaultAdminRights() -> AdminRights {
+auto ChatData::defaultAdminRights(not_null<UserData*> user) -> AdminRights {
+	const auto isCreator = (creator == user->bareId())
+		|| (user->isSelf() && amCreator());
 	using Flag = AdminRight;
 	return Flag::f_change_info
 		| Flag::f_delete_messages
 		| Flag::f_ban_users
 		| Flag::f_invite_users
-		| Flag::f_pin_messages;
+		| Flag::f_pin_messages
+		| Flag::f_manage_call
+		| (isCreator ? Flag::f_add_admins : Flag(0));
 }
 
 bool ChatData::canWrite() const {
@@ -96,16 +110,12 @@ void ChatData::setName(const QString &newName) {
 }
 
 void ChatData::applyEditAdmin(not_null<UserData*> user, bool isAdmin) {
-	auto flags = Notify::PeerUpdate::Flag::AdminsChanged
-		| Notify::PeerUpdate::Flag::None;
 	if (isAdmin) {
 		admins.emplace(user);
 	} else {
 		admins.remove(user);
 	}
-	Notify::peerUpdatedDelayed(
-		this,
-		Notify::PeerUpdate::Flag::AdminsChanged);
+	session().changes().peerUpdated(this, UpdateFlag::Admins);
 }
 
 void ChatData::invalidateParticipants() {
@@ -115,16 +125,18 @@ void ChatData::invalidateParticipants() {
 	//setDefaultRestrictions(MTP_chatBannedRights(MTP_flags(0), MTP_int(0)));
 	invitedByMe.clear();
 	botStatus = 0;
-	Notify::peerUpdatedDelayed(
+	session().changes().peerUpdated(
 		this,
-		UpdateFlag::MembersChanged | UpdateFlag::AdminsChanged);
+		UpdateFlag::Members | UpdateFlag::Admins);
 }
 
 void ChatData::setInviteLink(const QString &newInviteLink) {
-	if (newInviteLink != _inviteLink) {
-		_inviteLink = newInviteLink;
-		Notify::peerUpdatedDelayed(this, UpdateFlag::InviteLinkChanged);
-	}
+	_inviteLink = newInviteLink;
+}
+
+bool ChatData::canHaveInviteLink() const {
+	return amCreator()
+		|| (adminRights() & AdminRight::f_invite_users);
 }
 
 void ChatData::setAdminRights(const MTPChatAdminRights &rights) {
@@ -132,11 +144,9 @@ void ChatData::setAdminRights(const MTPChatAdminRights &rights) {
 		return;
 	}
 	_adminRights.set(rights.c_chatAdminRights().vflags().v);
-	Notify::peerUpdatedDelayed(
+	session().changes().peerUpdated(
 		this,
-		(UpdateFlag::RightsChanged
-			| UpdateFlag::AdminsChanged
-			| UpdateFlag::BannedUsersChanged));
+		UpdateFlag::Rights | UpdateFlag::Admins | UpdateFlag::BannedUsers);
 }
 
 void ChatData::setDefaultRestrictions(const MTPChatBannedRights &rights) {
@@ -144,15 +154,15 @@ void ChatData::setDefaultRestrictions(const MTPChatBannedRights &rights) {
 		return;
 	}
 	_defaultRestrictions.set(rights.c_chatBannedRights().vflags().v);
-	Notify::peerUpdatedDelayed(this, UpdateFlag::RightsChanged);
+	session().changes().peerUpdated(this, UpdateFlag::Rights);
 }
 
 void ChatData::refreshBotStatus() {
 	if (participants.empty()) {
 		botStatus = 0;
 	} else {
-		const auto bot = ranges::find_if(participants, &UserData::isBot);
-		botStatus = (bot == end(participants)) ? -1 : 2;
+		const auto bot = ranges::none_of(participants, &UserData::isBot);
+		botStatus = bot ? -1 : 2;
 	}
 }
 
@@ -176,9 +186,50 @@ void ChatData::setMigrateToChannel(ChannelData *channel) {
 	if (_migratedTo != channel) {
 		_migratedTo = channel;
 		if (channel->amIn()) {
-			Notify::peerUpdatedDelayed(this, UpdateFlag::MigrationChanged);
+			session().changes().peerUpdated(this, UpdateFlag::Migration);
 		}
 	}
+}
+
+void ChatData::setGroupCall(const MTPInputGroupCall &call) {
+	if (migrateTo()) {
+		return;
+	}
+	call.match([&](const MTPDinputGroupCall &data) {
+		if (_call && _call->id() == data.vid().v) {
+			return;
+		} else if (!_call && !data.vid().v) {
+			return;
+		} else if (!data.vid().v) {
+			clearGroupCall();
+			return;
+		}
+		const auto hasCall = (_call != nullptr);
+		if (hasCall) {
+			owner().unregisterGroupCall(_call.get());
+		}
+		_call = std::make_unique<Data::GroupCall>(
+			this,
+			data.vid().v,
+			data.vaccess_hash().v);
+		owner().registerGroupCall(_call.get());
+		session().changes().peerUpdated(this, UpdateFlag::GroupCall);
+		addFlags(MTPDchat::Flag::f_call_active);
+	});
+}
+
+void ChatData::clearGroupCall() {
+	if (!_call) {
+		return;
+	} else if (const auto group = migrateTo(); group && !group->groupCall()) {
+		group->migrateCall(base::take(_call));
+	} else {
+		owner().unregisterGroupCall(_call.get());
+		_call = nullptr;
+	}
+	session().changes().peerUpdated(this, UpdateFlag::GroupCall);
+	removeFlags(MTPDchat::Flag::f_call_active
+		| MTPDchat::Flag::f_call_not_empty);
 }
 
 namespace Data {
@@ -199,6 +250,7 @@ void ApplyChatUpdate(
 		return;
 	}
 	const auto user = chat->owner().userLoaded(update.vuser_id().v);
+	const auto session = &chat->session();
 	if (!user
 		|| (!chat->participants.empty()
 			&& chat->participants.contains(user))) {
@@ -213,7 +265,7 @@ void ApplyChatUpdate(
 		chat->botStatus = 0;
 	} else {
 		chat->participants.emplace(user);
-		if (update.vinviter_id().v == chat->session().userId()) {
+		if (update.vinviter_id().v == session->userId()) {
 			chat->invitedByMe.insert(user);
 		} else {
 			chat->invitedByMe.remove(user);
@@ -222,13 +274,11 @@ void ApplyChatUpdate(
 		if (user->isBot()) {
 			chat->botStatus = 2;
 			if (!user->botInfo->inited) {
-				chat->session().api().requestFullPeer(user);
+				session->api().requestFullPeer(user);
 			}
 		}
 	}
-	Notify::peerUpdatedDelayed(
-		chat,
-		Notify::PeerUpdate::Flag::MembersChanged);
+	session->changes().peerUpdated(chat, UpdateFlag::Members);
 }
 
 void ApplyChatUpdate(
@@ -270,9 +320,7 @@ void ApplyChatUpdate(
 			chat->refreshBotStatus();
 		}
 	}
-	Notify::peerUpdatedDelayed(
-		chat,
-		Notify::PeerUpdate::Flag::MembersChanged);
+	chat->session().changes().peerUpdated(chat, UpdateFlag::Members);
 }
 
 void ApplyChatUpdate(
@@ -282,7 +330,7 @@ void ApplyChatUpdate(
 		!= ChatData::UpdateStatus::Good) {
 		return;
 	}
-
+	const auto session = &chat->session();
 	const auto user = chat->owner().userLoaded(update.vuser_id().v);
 	if (!user) {
 		chat->invalidateParticipants();
@@ -290,21 +338,19 @@ void ApplyChatUpdate(
 	}
 	if (user->isSelf()) {
 		chat->setAdminRights(MTP_chatAdminRights(mtpIsTrue(update.vis_admin())
-			? MTP_flags(ChatData::DefaultAdminRights())
+			? MTP_flags(chat->defaultAdminRights(user))
 			: MTP_flags(0)));
 	}
 	if (mtpIsTrue(update.vis_admin())) {
 		if (chat->noParticipantInfo()) {
-			chat->session().api().requestFullPeer(chat);
+			session->api().requestFullPeer(chat);
 		} else {
 			chat->admins.emplace(user);
 		}
 	} else {
 		chat->admins.erase(user);
 	}
-	Notify::peerUpdatedDelayed(
-		chat,
-		Notify::PeerUpdate::Flag::AdminsChanged);
+	session->changes().peerUpdated(chat, UpdateFlag::Admins);
 }
 
 void ApplyChatUpdate(
@@ -319,6 +365,12 @@ void ApplyChatUpdate(
 
 void ApplyChatUpdate(not_null<ChatData*> chat, const MTPDchatFull &update) {
 	ApplyChatUpdate(chat, update.vparticipants());
+
+	if (const auto call = update.vcall()) {
+		chat->setGroupCall(*call);
+	} else {
+		chat->clearGroupCall();
+	}
 
 	if (const auto info = update.vbot_info()) {
 		for (const auto &item : info->v) {
@@ -337,19 +389,17 @@ void ApplyChatUpdate(not_null<ChatData*> chat, const MTPDchatFull &update) {
 	} else {
 		chat->setUserpicPhoto(MTP_photoEmpty(MTP_long(0)));
 	}
-	chat->setInviteLink(update.vexported_invite().match([&](
-			const MTPDchatInviteExported &data) {
-		return qs(data.vlink());
-	}, [&](const MTPDchatInviteEmpty &) {
-		return QString();
-	}));
-	if (const auto pinned = update.vpinned_msg_id()) {
-		chat->setPinnedMessageId(pinned->v);
+	if (const auto invite = update.vexported_invite()) {
+		chat->session().api().inviteLinks().setPermanent(chat, *invite);
 	} else {
-		chat->clearPinnedMessage();
+		chat->session().api().inviteLinks().clearPermanent(chat);
+	}
+	if (const auto pinned = update.vpinned_msg_id()) {
+		SetTopPinnedMessageId(chat, pinned->v);
 	}
 	chat->checkFolder(update.vfolder_id().value_or_empty());
 	chat->fullUpdated();
+	chat->setAbout(qs(update.vabout()));
 
 	chat->session().api().applyNotifySettings(
 		MTP_inputNotifyPeer(chat->input),
@@ -359,6 +409,7 @@ void ApplyChatUpdate(not_null<ChatData*> chat, const MTPDchatFull &update) {
 void ApplyChatUpdate(
 		not_null<ChatData*> chat,
 		const MTPChatParticipants &participants) {
+	const auto session = &chat->session();
 	participants.match([&](const MTPDchatParticipantsForbidden &data) {
 		if (const auto self = data.vself_participant()) {
 			// self->
@@ -380,7 +431,7 @@ void ApplyChatUpdate(
 		chat->invitedByMe.clear();
 		chat->admins.clear();
 		chat->setAdminRights(MTP_chatAdminRights(MTP_flags(0)));
-		const auto selfUserId = chat->session().userId();
+		const auto selfUserId = session->userId();
 		for (const auto &participant : list) {
 			const auto userId = participant.match([&](const auto &data) {
 				return data.vuser_id().v;
@@ -409,7 +460,7 @@ void ApplyChatUpdate(
 				chat->admins.emplace(user);
 				if (user->isSelf()) {
 					chat->setAdminRights(MTP_chatAdminRights(
-						MTP_flags(ChatData::DefaultAdminRights())));
+						MTP_flags(chat->defaultAdminRights(user))));
 				}
 			}, [](const MTPDchatParticipant &) {
 			});
@@ -429,10 +480,9 @@ void ApplyChatUpdate(
 			}
 		}
 		chat->refreshBotStatus();
-		Notify::peerUpdatedDelayed(
+		session->changes().peerUpdated(
 			chat,
-			Notify::PeerUpdate::Flag::MembersChanged
-			| Notify::PeerUpdate::Flag::AdminsChanged);
+			UpdateFlag::Members | UpdateFlag::Admins);
 	});
 }
 

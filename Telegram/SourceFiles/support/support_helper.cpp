@@ -11,13 +11,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_drafts.h"
 #include "data/data_user.h"
 #include "data/data_session.h"
+#include "data/data_changes.h"
 #include "api/api_text_entities.h"
 #include "history/history.h"
 #include "boxes/abstract_box.h"
 #include "ui/toast/toast.h"
 #include "ui/widgets/input_fields.h"
+#include "ui/chat/attach/attach_prepare.h"
+#include "ui/text/format_values.h"
 #include "ui/text/text_entity.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
 #include "chat_helpers/message_field.h"
 #include "chat_helpers/emoji_suggestions_widget.h"
 #include "base/unixtime.h"
@@ -26,10 +29,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/storage_media_prepare.h"
 #include "storage/localimageloader.h"
 #include "core/sandbox.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 #include "main/main_session.h"
-#include "observer_peer.h"
 #include "apiwrap.h"
 #include "facades.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 
 namespace Main {
@@ -43,11 +48,11 @@ constexpr auto kOccupyFor = TimeId(60);
 constexpr auto kReoccupyEach = 30 * crl::time(1000);
 constexpr auto kMaxSupportInfoLength = MaxMessageSize * 4;
 
-class EditInfoBox : public BoxContent {
+class EditInfoBox : public Ui::BoxContent {
 public:
 	EditInfoBox(
 		QWidget*,
-		not_null<Main::Session*> session,
+		not_null<Window::SessionController*> controller,
 		const TextWithTags &text,
 		Fn<void(TextWithTags, Fn<void(bool success)>)> submit);
 
@@ -56,7 +61,7 @@ protected:
 	void setInnerFocus() override;
 
 private:
-	not_null<Main::Session*> _session;
+	const not_null<Window::SessionController*> _controller;
 	object_ptr<Ui::InputField> _field = { nullptr };
 	Fn<void(TextWithTags, Fn<void(bool success)>)> _submit;
 
@@ -64,10 +69,10 @@ private:
 
 EditInfoBox::EditInfoBox(
 	QWidget*,
-	not_null<Main::Session*> session,
+	not_null<Window::SessionController*> controller,
 	const TextWithTags &text,
 	Fn<void(TextWithTags, Fn<void(bool success)>)> submit)
-: _session(session)
+: _controller(controller)
 , _field(
 	this,
 	st::supportInfoField,
@@ -76,12 +81,13 @@ EditInfoBox::EditInfoBox(
 	text)
 , _submit(std::move(submit)) {
 	_field->setMaxLength(kMaxSupportInfoLength);
-	_field->setSubmitSettings(Ui::InputField::SubmitSettings::Both);
+	_field->setSubmitSettings(
+		Core::App().settings().sendSubmitWay());
 	_field->setInstantReplaces(Ui::InstantReplaces::Default());
 	_field->setInstantReplacesEnabled(
-		session->settings().replaceEmojiValue());
+		Core::App().settings().replaceEmojiValue());
 	_field->setMarkdownReplacesEnabled(rpl::single(true));
-	_field->setEditLinkCallback(DefaultEditLinkCallback(session, _field));
+	_field->setEditLinkCallback(DefaultEditLinkCallback(controller, _field));
 }
 
 void EditInfoBox::prepare() {
@@ -105,7 +111,7 @@ void EditInfoBox::prepare() {
 	Ui::Emoji::SuggestionsController::Init(
 		getDelegate()->outerContainer(),
 		_field,
-		_session);
+		&_controller->session());
 
 	auto cursor = _field->textCursor();
 	cursor.movePosition(QTextCursor::End);
@@ -130,29 +136,6 @@ void EditInfoBox::setInnerFocus() {
 	_field->setFocusFast();
 }
 
-QString FormatDateTime(TimeId value) {
-	const auto now = QDateTime::currentDateTime();
-	const auto date = base::unixtime::parse(value);
-	if (date.date() == now.date()) {
-		return tr::lng_mediaview_today(
-			tr::now,
-			lt_time,
-			date.time().toString(cTimeFormat()));
-	} else if (date.date().addDays(1) == now.date()) {
-		return tr::lng_mediaview_yesterday(
-			tr::now,
-			lt_time,
-			date.time().toString(cTimeFormat()));
-	} else {
-		return tr::lng_mediaview_date_time(
-			tr::now,
-			lt_date,
-			date.date().toString(qsl("dd.MM.yy")),
-			lt_time,
-			date.time().toString(cTimeFormat()));
-	}
-}
-
 uint32 OccupationTag() {
 	return uint32(Core::Sandbox::Instance().installationTag() & 0xFFFFFFFF);
 }
@@ -172,7 +155,7 @@ Data::Draft OccupiedDraft(const QString &normalizedName) {
 			+ normalizedName },
 		MsgId(0),
 		MessageCursor(),
-		false
+		Data::PreviewState::Allowed
 	};
 }
 
@@ -287,10 +270,11 @@ TimeId OccupiedBySomeoneTill(History *history) {
 
 Helper::Helper(not_null<Main::Session*> session)
 : _session(session)
+, _api(&_session->mtp())
 , _templates(_session)
 , _reoccupyTimer([=] { reoccupy(); })
 , _checkOccupiedTimer([=] { checkOccupiedChats(); }) {
-	request(MTPhelp_GetSupportName(
+	_api.request(MTPhelp_GetSupportName(
 	)).done([=](const MTPhelp_SupportName &result) {
 		result.match([&](const MTPDhelp_supportName &data) {
 			setSupportName(qs(data.vname()));
@@ -331,14 +315,14 @@ void Helper::cloudDraftChanged(not_null<History*> history) {
 void Helper::chatOccupiedUpdated(not_null<History*> history) {
 	if (const auto till = OccupiedBySomeoneTill(history)) {
 		_occupiedChats[history] = till + 2;
-		Notify::peerUpdatedDelayed(
-			history->peer,
-			Notify::PeerUpdate::Flag::UserOccupiedChanged);
+		history->session().changes().historyUpdated(
+			history,
+			Data::HistoryUpdate::Flag::ChatOccupied);
 		checkOccupiedChats();
 	} else if (_occupiedChats.take(history)) {
-		Notify::peerUpdatedDelayed(
-			history->peer,
-			Notify::PeerUpdate::Flag::UserOccupiedChanged);
+		history->session().changes().historyUpdated(
+			history,
+			Data::HistoryUpdate::Flag::ChatOccupied);
 	}
 }
 
@@ -352,9 +336,9 @@ void Helper::checkOccupiedChats() {
 		if (nearest->second <= now) {
 			const auto history = nearest->first;
 			_occupiedChats.erase(nearest);
-			Notify::peerUpdatedDelayed(
-				history->peer,
-				Notify::PeerUpdate::Flag::UserOccupiedChanged);
+			history->session().changes().historyUpdated(
+				history,
+				Data::HistoryUpdate::Flag::ChatOccupied);
 		} else {
 			_checkOccupiedTimer.callOnce(
 				(nearest->second - now) * crl::time(1000));
@@ -421,13 +405,14 @@ bool Helper::isOccupiedBySomeone(History *history) const {
 }
 
 void Helper::refreshInfo(not_null<UserData*> user) {
-	request(MTPhelp_GetUserInfo(
+	_api.request(MTPhelp_GetUserInfo(
 		user->inputUser
 	)).done([=](const MTPhelp_UserInfo &result) {
 		applyInfo(user, result);
-		if (_userInfoEditPending.contains(user)) {
-			_userInfoEditPending.erase(user);
-			showEditInfoBox(user);
+		if (const auto controller = _userInfoEditPending.take(user)) {
+			if (const auto strong = controller->get()) {
+				showEditInfoBox(strong, user);
+			}
 		}
 	}).send();
 }
@@ -436,9 +421,9 @@ void Helper::applyInfo(
 		not_null<UserData*> user,
 		const MTPhelp_UserInfo &result) {
 	const auto notify = [&] {
-		Notify::peerUpdatedDelayed(
+		user->session().changes().peerUpdated(
 			user,
-			Notify::PeerUpdate::Flag::UserSupportInfoChanged);
+			Data::PeerUpdate::Flag::SupportInfo);
 	};
 	const auto remove = [&] {
 		if (_userInformation.take(user)) {
@@ -451,7 +436,7 @@ void Helper::applyInfo(
 		info.date = data.vdate().v;
 		info.text = TextWithEntities{
 			qs(data.vmessage()),
-			Api::EntitiesFromMTP(data.ventities().v) };
+			Api::EntitiesFromMTP(&user->session(), data.ventities().v) };
 		if (info.text.empty()) {
 			remove();
 		} else if (_userInformation[user] != info) {
@@ -464,9 +449,9 @@ void Helper::applyInfo(
 }
 
 rpl::producer<UserInfo> Helper::infoValue(not_null<UserData*> user) const {
-	return Notify::PeerUpdateValue(
+	return user->session().changes().peerFlagsValue(
 		user,
-		Notify::PeerUpdate::Flag::UserSupportInfoChanged
+		Data::PeerUpdate::Flag::SupportInfo
 	) | rpl::map([=] {
 		return infoCurrent(user);
 	});
@@ -477,7 +462,10 @@ rpl::producer<QString> Helper::infoLabelValue(
 	return infoValue(
 		user
 	) | rpl::map([](const Support::UserInfo &info) {
-		return info.author + ", " + FormatDateTime(info.date);
+		const auto time = Ui::FormatDateTime(
+			base::unixtime::parse(info.date),
+			cTimeFormat());
+		return info.author + ", " + time;
 	});
 }
 
@@ -495,14 +483,18 @@ UserInfo Helper::infoCurrent(not_null<UserData*> user) const {
 	return (i != end(_userInformation)) ? i->second : UserInfo();
 }
 
-void Helper::editInfo(not_null<UserData*> user) {
+void Helper::editInfo(
+		not_null<Window::SessionController*> controller,
+		not_null<UserData*> user) {
 	if (!_userInfoEditPending.contains(user)) {
-		_userInfoEditPending.emplace(user);
+		_userInfoEditPending.emplace(user, controller.get());
 		refreshInfo(user);
 	}
 }
 
-void Helper::showEditInfoBox(not_null<UserData*> user) {
+void Helper::showEditInfoBox(
+		not_null<Window::SessionController*> controller,
+		not_null<UserData*> user) {
 	const auto info = infoCurrent(user);
 	const auto editData = TextWithTags{
 		info.text.text,
@@ -516,8 +508,8 @@ void Helper::showEditInfoBox(not_null<UserData*> user) {
 		}, done);
 	};
 	Ui::show(
-		Box<EditInfoBox>(&user->session(), editData, save),
-		LayerOption::KeepOther);
+		Box<EditInfoBox>(controller, editData, save),
+		Ui::LayerOption::KeepOther);
 }
 
 void Helper::saveInfo(
@@ -530,7 +522,7 @@ void Helper::saveInfo(
 			return;
 		} else {
 			i->second.data = text;
-			request(base::take(i->second.requestId)).cancel();
+			_api.request(base::take(i->second.requestId)).cancel();
 		}
 	} else {
 		_userInfoSaving.emplace(user, SavingInfo{ text });
@@ -542,9 +534,10 @@ void Helper::saveInfo(
 	TextUtilities::Trim(text);
 
 	const auto entities = Api::EntitiesToMTP(
+		&user->session(),
 		text.entities,
 		Api::ConvertOption::SkipLocal);
-	_userInfoSaving[user].requestId = request(MTPhelp_EditUserInfo(
+	_userInfoSaving[user].requestId = _api.request(MTPhelp_EditUserInfo(
 		user->inputUser,
 		MTP_string(text.text),
 		entities
@@ -568,7 +561,9 @@ QString ChatOccupiedString(not_null<History*> history) {
 		: hand + ' ' + name + " is here";
 }
 
-QString InterpretSendPath(const QString &path) {
+QString InterpretSendPath(
+		not_null<Window::SessionController*> window,
+		const QString &path) {
 	QFile f(path);
 	if (!f.open(QIODevice::ReadOnly)) {
 		return "App Error: Could not open interpret file: " + path;
@@ -581,7 +576,7 @@ QString InterpretSendPath(const QString &path) {
 	auto caption = QString();
 	for (const auto &line : lines) {
 		if (line.startsWith(qstr("from: "))) {
-			if (Auth().userId() != line.mid(qstr("from: ").size()).toInt()) {
+			if (window->session().userId() != line.mid(qstr("from: ").size()).toInt()) {
 				return "App Error: Wrong current user.";
 			}
 		} else if (line.startsWith(qstr("channel: "))) {
@@ -601,7 +596,7 @@ QString InterpretSendPath(const QString &path) {
 			return "App Error: Invalid command: " + line;
 		}
 	}
-	const auto history = Auth().data().historyLoaded(toId);
+	const auto history = window->session().data().historyLoaded(toId);
 	if (!history) {
 		return "App Error: Could not find channel with id: " + QString::number(peerToChannel(toId));
 	}

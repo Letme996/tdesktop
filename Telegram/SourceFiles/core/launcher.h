@@ -7,15 +7,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
+#include "core/base_integration.h"
+
 namespace Core {
 
 class Launcher {
 public:
 	Launcher(
 		int argc,
-		char *argv[],
-		const QString &deviceModel,
-		const QString &systemVersion);
+		char *argv[]);
 
 	static std::unique_ptr<Launcher> Create(int argc, char *argv[]);
 
@@ -24,8 +24,6 @@ public:
 	QString argumentsString() const;
 	bool customWorkingDir() const;
 
-	QString deviceModel() const;
-	QString systemVersion() const;
 	uint64 installationTag() const;
 
 	bool checkPortableVersionFolder();
@@ -63,9 +61,7 @@ private:
 	int _argc;
 	char **_argv;
 	QStringList _arguments;
-
-	const QString _deviceModel;
-	const QString _systemVersion;
+	BaseIntegration _baseIntegration;
 
 	bool _customWorkingDir = false;
 

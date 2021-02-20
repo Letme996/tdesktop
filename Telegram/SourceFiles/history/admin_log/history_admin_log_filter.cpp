@@ -14,7 +14,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_channel.h"
 #include "data/data_user.h"
 #include "base/unixtime.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
+
+namespace Data {
+class CloudImageView;
+} // namespace Data
 
 namespace AdminLog {
 namespace {
@@ -58,7 +63,8 @@ private:
 
 	QRect _checkRect;
 
-	not_null<UserData*> _user;
+	const not_null<UserData*> _user;
+	std::shared_ptr<Data::CloudImageView> _userpic;
 	QString _statusText;
 	bool _statusOnline = false;
 
@@ -112,7 +118,7 @@ void UserCheckbox::paintEvent(QPaintEvent *e) {
 
 	auto userpicLeft = _checkRect.x() + _checkRect.width() + st::adminLogFilterUserpicLeft;
 	auto userpicTop = 0;
-	_user->paintUserpicLeft(p, userpicLeft, userpicTop, width(), st::contactsPhotoSize);
+	_user->paintUserpicLeft(p, _userpic, userpicLeft, userpicTop, width(), st::contactsPhotoSize);
 
 	auto nameLeft = userpicLeft + st::contactsPhotoSize + st::contactsPadding.left();
 	auto nameTop = userpicTop + st::contactsNameTop;
@@ -276,6 +282,7 @@ void FilterBox::Inner::createActionsCheckboxes(const FilterValue &filter) {
 	addFlag(Flag::f_edit, tr::lng_admin_log_filter_messages_edited(tr::now));
 	if (isGroup) {
 		addFlag(Flag::f_pinned, tr::lng_admin_log_filter_messages_pinned(tr::now));
+		addFlag(Flag::f_group_call, tr::lng_admin_log_filter_voice_chats(tr::now));
 	}
 	addFlag(Flag::f_leave, tr::lng_admin_log_filter_members_removed(tr::now));
 }

@@ -8,12 +8,21 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "api/api_common.h"
+#include "mtproto/facade.h"
 
 #include <QtCore/QTimer>
 
 class ApiWrap;
 struct FileLoadResult;
 struct SendMediaReady;
+
+namespace Api {
+enum class SendProgressType;
+} // namespace Api
+
+namespace Main {
+class Session;
+} // namespace Main
 
 namespace Storage {
 
@@ -54,12 +63,14 @@ struct UploadSecureDone {
 	int partsCount = 0;
 };
 
-class Uploader : public QObject, public RPCSender {
+class Uploader final : public QObject {
 	Q_OBJECT
 
 public:
 	explicit Uploader(not_null<ApiWrap*> api);
 	~Uploader();
+
+	[[nodiscard]] Main::Session &session() const;
 
 	void uploadMedia(const FullMsgId &msgId, const SendMediaReady &image);
 	void upload(
@@ -112,11 +123,21 @@ private:
 	struct File;
 
 	void partLoaded(const MTPBool &result, mtpRequestId requestId);
-	bool partFailed(const RPCError &err, mtpRequestId requestId);
+	void partFailed(const RPCError &error, mtpRequestId requestId);
+
+	void processPhotoProgress(const FullMsgId &msgId);
+	void processPhotoFailed(const FullMsgId &msgId);
+	void processDocumentProgress(const FullMsgId &msgId);
+	void processDocumentFailed(const FullMsgId &msgId);
 
 	void currentFailed();
 
-	not_null<ApiWrap*> _api;
+	void sendProgressUpdate(
+		not_null<HistoryItem*> item,
+		Api::SendProgressType type,
+		int progress = 0);
+
+	const not_null<ApiWrap*> _api;
 	base::flat_map<mtpRequestId, QByteArray> requestsSent;
 	base::flat_map<mtpRequestId, int32> docRequestsSent;
 	base::flat_map<mtpRequestId, int32> dcMap;
@@ -139,6 +160,8 @@ private:
 	rpl::event_stream<FullMsgId> _photoFailed;
 	rpl::event_stream<FullMsgId> _documentFailed;
 	rpl::event_stream<FullMsgId> _secureFailed;
+
+	rpl::lifetime _lifetime;
 
 };
 

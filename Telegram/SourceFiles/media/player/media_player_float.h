@@ -14,7 +14,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace Window {
 class SessionController;
-class AbstractSectionWidget;
 enum class Column;
 } // namespace Window
 
@@ -26,7 +25,7 @@ class PlaybackProgress;
 
 namespace Media {
 namespace Streaming {
-class Player;
+class Instance;
 } // namespace Streaming
 } // namespace Media
 
@@ -37,12 +36,11 @@ class Float : public Ui::RpWidget, private base::Subscriber {
 public:
 	Float(
 		QWidget *parent,
-		not_null<Window::SessionController*> controller,
 		not_null<HistoryItem*> item,
 		Fn<void(bool visible)> toggleCallback,
 		Fn<void(bool closed)> draggedCallback);
 
-	HistoryItem *item() const {
+	[[nodiscard]] HistoryItem *item() const {
 		return _item;
 	}
 	void setOpacity(float64 opacity) {
@@ -51,17 +49,17 @@ public:
 			update();
 		}
 	}
-	float64 countOpacityByParent() const {
+	[[nodiscard]] float64 countOpacityByParent() const {
 		return outRatio();
 	}
-	bool isReady() const {
-		return (getPlayer() != nullptr);
+	[[nodiscard]] bool isReady() const {
+		return (getStreamed() != nullptr);
 	}
 	void detach();
-	bool detached() const {
+	[[nodiscard]] bool detached() const {
 		return !_item;
 	}
-	bool dragged() const {
+	[[nodiscard]] bool dragged() const {
 		return _drag;
 	}
 	void resetMouseState() {
@@ -79,18 +77,17 @@ protected:
 	void mouseDoubleClickEvent(QMouseEvent *e) override;
 
 private:
-	float64 outRatio() const;
-	Streaming::Player *getPlayer() const;
-	View::PlaybackProgress *getPlayback() const;
+	[[nodiscard]] float64 outRatio() const;
+	[[nodiscard]] Streaming::Instance *getStreamed() const;
+	[[nodiscard]] View::PlaybackProgress *getPlayback() const;
 	void repaintItem();
 	void prepareShadow();
 	bool hasFrame() const;
 	bool fillFrame();
-	QRect getInnerRect() const;
+	[[nodiscard]] QRect getInnerRect() const;
 	void finishDrag(bool closed);
 	void pauseResume();
 
-	not_null<Window::SessionController*> _controller;
 	HistoryItem *_item = nullptr;
 	Fn<void(bool visible)> _toggleCallback;
 
@@ -107,14 +104,19 @@ private:
 
 };
 
+class FloatSectionDelegate {
+public:
+	virtual QRect floatPlayerAvailableRect() = 0;
+	virtual bool floatPlayerHandleWheelEvent(QEvent *e) = 0;
+};
+
 class FloatDelegate {
 public:
 	virtual not_null<Ui::RpWidget*> floatPlayerWidget() = 0;
-	virtual not_null<Window::SessionController*> floatPlayerController() = 0;
-	virtual not_null<Window::AbstractSectionWidget*> floatPlayerGetSection(
+	virtual not_null<FloatSectionDelegate*> floatPlayerGetSection(
 		Window::Column column) = 0;
 	virtual void floatPlayerEnumerateSections(Fn<void(
-		not_null<Window::AbstractSectionWidget*> widget,
+		not_null<FloatSectionDelegate*> widget,
 		Window::Column widgetColumn)> callback) = 0;
 	virtual bool floatPlayerIsVisible(not_null<HistoryItem*> item) = 0;
 
@@ -131,7 +133,10 @@ public:
 		return _raiseAll.events();
 	}
 	virtual rpl::producer<> floatPlayerUpdatePositionsRequests() {
-		return _updatePositions.events();;
+		return _updatePositions.events();
+	}
+	virtual rpl::producer<> floatPlayerAreaUpdates() {
+		return _areaUpdates.events();
 	}
 
 	struct FloatPlayerFilterWheelEventRequest {
@@ -162,6 +167,9 @@ protected:
 	void floatPlayerUpdatePositions() {
 		_updatePositions.fire({});
 	}
+	void floatPlayerAreaUpdated() {
+		_areaUpdates.fire({});
+	}
 	std::optional<bool> floatPlayerFilterWheelEvent(
 			not_null<QObject*> object,
 			not_null<QEvent*> event) {
@@ -176,6 +184,7 @@ private:
 	rpl::event_stream<> _showVisible;
 	rpl::event_stream<> _raiseAll;
 	rpl::event_stream<> _updatePositions;
+	rpl::event_stream<> _areaUpdates;
 	rpl::event_stream<FloatPlayerFilterWheelEventRequest> _filterWheelEvent;
 
 };
@@ -194,7 +203,6 @@ private:
 		template <typename ToggleCallback, typename DraggedCallback>
 		Item(
 			not_null<QWidget*> parent,
-			not_null<Window::SessionController*> controller,
 			not_null<HistoryItem*> item,
 			ToggleCallback toggle,
 			DraggedCallback dragged);
@@ -243,7 +251,6 @@ private:
 
 	not_null<FloatDelegate*> _delegate;
 	not_null<Ui::RpWidget*> _parent;
-	not_null<Window::SessionController*> _controller;
 	std::vector<std::unique_ptr<Item>> _items;
 
 	rpl::event_stream<FullMsgId> _closeEvents;

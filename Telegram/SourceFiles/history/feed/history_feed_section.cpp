@@ -59,7 +59,7 @@ object_ptr<Window::SectionWidget> Memento::createWidget(
 	}
 	auto result = object_ptr<Widget>(parent, controller, _feed);
 	result->setInternalState(geometry, this);
-	return std::move(result);
+	return result;
 }
 
 Widget::Widget(
@@ -181,10 +181,13 @@ void Widget::showAtPosition(Data::MessagePosition position) {
 bool Widget::showAtPositionNow(Data::MessagePosition position) {
 	if (const auto scrollTop = _inner->scrollTopForPosition(position)) {
 		const auto currentScrollTop = _scroll->scrollTop();
-		const auto wanted = snap(*scrollTop, 0, _scroll->scrollTopMax());
+		const auto wanted = std::clamp(
+			*scrollTop,
+			0,
+			_scroll->scrollTopMax());
 		const auto fullDelta = (wanted - currentScrollTop);
 		const auto limit = _scroll->height();
-		const auto scrollDelta = snap(fullDelta, -limit, limit);
+		const auto scrollDelta = std::clamp(fullDelta, -limit, limit);
 		_inner->animatedScrollTo(
 			wanted,
 			position,
@@ -432,7 +435,10 @@ void Widget::listContentRefreshed() {
 	}
 	const auto position = *base::take(_nextAnimatedScrollPosition);
 	if (const auto scrollTop = _inner->scrollTopForPosition(position)) {
-		const auto wanted = snap(*scrollTop, 0, _scroll->scrollTopMax());
+		const auto wanted = std::clamp(
+			*scrollTop,
+			0,
+			_scroll->scrollTopMax());
 		_inner->animatedScrollTo(
 			wanted,
 			position,
@@ -456,7 +462,7 @@ ClickHandlerPtr Widget::listDateLink(not_null<Element*> view) {
 std::unique_ptr<Window::SectionMemento> Widget::createMemento() {
 	auto result = std::make_unique<Memento>(_feed);
 	saveState(result.get());
-	return std::move(result);
+	return result;
 }
 
 void Widget::saveState(not_null<Memento*> memento) {

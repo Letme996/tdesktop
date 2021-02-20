@@ -19,6 +19,10 @@ class RoundButton;
 class CheckView;
 } // namespace Ui
 
+namespace Main {
+class Session;
+} // namespace Main
+
 namespace Window {
 
 class Controller;
@@ -32,6 +36,7 @@ public:
 	virtual void setInnerFocus();
 
 	void showAnimated(const QPixmap &bgAnimCache, bool back = false);
+	void showFinished();
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -82,11 +87,13 @@ struct TermsLock {
 		return !(*this == other);
 	}
 
-	static TermsLock FromMTP(const MTPDhelp_termsOfService &data);
+	static TermsLock FromMTP(
+		Main::Session *session,
+		const MTPDhelp_termsOfService &data);
 
 };
 
-class TermsBox : public BoxContent {
+class TermsBox : public Ui::BoxContent {
 public:
 	TermsBox(
 		QWidget*,

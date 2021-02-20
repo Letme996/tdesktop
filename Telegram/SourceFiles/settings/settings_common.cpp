@@ -13,11 +13,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "settings/settings_main.h"
 #include "settings/settings_notifications.h"
 #include "settings/settings_privacy_security.h"
+#include "settings/settings_folders.h"
 #include "settings/settings_calls.h"
+#include "core/application.h"
 #include "ui/wrap/padding_wrap.h"
 #include "ui/wrap/vertical_layout.h"
 #include "ui/widgets/labels.h"
-#include "info/profile/info_profile_button.h"
+#include "ui/widgets/box_content_divider.h"
+#include "ui/widgets/buttons.h"
 #include "boxes/abstract_box.h"
 #include "window/themes/window_theme_editor_box.h"
 #include "window/window_session_controller.h"
@@ -25,7 +28,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lang/lang_keys.h"
 #include "mainwindow.h"
 #include "main/main_session.h"
-#include "styles/style_boxes.h"
+#include "main/main_domain.h"
+#include "styles/style_layers.h"
 #include "styles/style_settings.h"
 
 namespace Settings {
@@ -45,6 +49,8 @@ object_ptr<Section> CreateSection(
 		return object_ptr<PrivacySecurity>(parent, controller);
 	case Type::Advanced:
 		return object_ptr<Advanced>(parent, controller);
+	case Type::Folders:
+		return object_ptr<Folders>(parent, controller);
 	case Type::Chat:
 		return object_ptr<Chat>(parent, controller);
 	case Type::Calls:
@@ -64,7 +70,7 @@ void AddSkip(not_null<Ui::VerticalLayout*> container, int skip) {
 }
 
 void AddDivider(not_null<Ui::VerticalLayout*> container) {
-	container->add(object_ptr<BoxContentDivider>(container));
+	container->add(object_ptr<Ui::BoxContentDivider>(container));
 }
 
 void AddDividerText(
@@ -79,21 +85,19 @@ void AddDividerText(
 		st::settingsDividerLabelPadding));
 }
 
-not_null<Button*> AddButton(
-		not_null<Ui::VerticalLayout*> container,
+object_ptr<Button> CreateButton(
+		not_null<QWidget*> parent,
 		rpl::producer<QString> text,
-		const style::InfoProfileButton &st,
+		const style::SettingsButton &st,
 		const style::icon *leftIcon,
 		int iconLeft) {
-	const auto result = container->add(object_ptr<Button>(
-		container,
-		std::move(text),
-		st));
+	auto result = object_ptr<Button>(parent, std::move(text), st);
+	const auto button = result.data();
 	if (leftIcon) {
-		const auto icon = Ui::CreateChild<Ui::RpWidget>(result);
+		const auto icon = Ui::CreateChild<Ui::RpWidget>(button);
 		icon->setAttribute(Qt::WA_TransparentForMouseEvents);
 		icon->resize(leftIcon->size());
-		result->sizeValue(
+		button->sizeValue(
 		) | rpl::start_with_next([=](QSize size) {
 			icon->moveToLeft(
 				iconLeft ? iconLeft : st::settingsSectionIconLeft,
@@ -104,8 +108,8 @@ not_null<Button*> AddButton(
 		) | rpl::start_with_next([=] {
 			Painter p(icon);
 			const auto width = icon->width();
-			const auto paintOver = (result->isOver() || result->isDown())
-				&& !result->isDisabled();
+			const auto paintOver = (button->isOver() || button->isDown())
+				&& !button->isDisabled();
 			if (paintOver) {
 				leftIcon->paint(p, QPoint(), width, st::menuIconFgOver->c);
 			} else {
@@ -116,14 +120,24 @@ not_null<Button*> AddButton(
 	return result;
 }
 
+not_null<Button*> AddButton(
+		not_null<Ui::VerticalLayout*> container,
+		rpl::producer<QString> text,
+		const style::SettingsButton &st,
+		const style::icon *leftIcon,
+		int iconLeft) {
+	return container->add(
+		CreateButton(container, std::move(text), st, leftIcon, iconLeft));
+}
+
 void CreateRightLabel(
 		not_null<Button*> button,
 		rpl::producer<QString> label,
-		const style::InfoProfileButton &st,
+		const style::SettingsButton &st,
 		rpl::producer<QString> buttonText) {
 	const auto name = Ui::CreateChild<Ui::FlatLabel>(
 		button.get(),
-		st::settingsButtonRight);
+		st.rightLabel);
 	rpl::combine(
 		button->widthValue(),
 		std::move(buttonText),
@@ -148,7 +162,7 @@ not_null<Button*> AddButtonWithLabel(
 		not_null<Ui::VerticalLayout*> container,
 		rpl::producer<QString> text,
 		rpl::producer<QString> label,
-		const style::InfoProfileButton &st,
+		const style::SettingsButton &st,
 		const style::icon *leftIcon,
 		int iconLeft) {
 	const auto button = AddButton(
@@ -183,6 +197,12 @@ void FillMenu(
 			tr::lng_settings_bg_theme_create(tr::now),
 			[=] { window->show(Box(Window::Theme::CreateBox, window)); });
 	} else {
+		const auto &list = Core::App().domain().accounts();
+		if (list.size() < ::Main::Domain::kMaxAccounts) {
+			addAction(tr::lng_menu_add_account(tr::now), [=] {
+				Core::App().domain().addActivated(MTP::Environment{});
+			});
+		}
 		if (!controller->session().supportMode()) {
 			addAction(
 				tr::lng_settings_information(tr::now),
@@ -190,7 +210,7 @@ void FillMenu(
 		}
 		addAction(
 			tr::lng_settings_logout(tr::now),
-			[=] { window->widget()->onLogout(); });
+			[=] { window->showLogoutConfirmation(); });
 	}
 }
 

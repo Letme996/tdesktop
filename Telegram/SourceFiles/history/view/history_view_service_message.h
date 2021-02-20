@@ -17,7 +17,8 @@ class Service : public Element {
 public:
 	Service(
 		not_null<ElementDelegate*> delegate,
-		not_null<HistoryService*> data);
+		not_null<HistoryService*> data,
+		Element *replacing);
 
 	int marginTop() const override;
 	int marginBottom() const override;
@@ -63,6 +64,7 @@ struct PaintContext {
 class ServiceMessagePainter {
 public:
 	static void paintDate(Painter &p, const QDateTime &date, int y, int w);
+	static void paintDate(Painter &p, const QString &dateText, int y, int w);
 	static void paintDate(Painter &p, const QString &dateText, int dateTextWidth, int y, int w);
 
 	static void paintBubble(Painter &p, int x, int y, int w, int h);

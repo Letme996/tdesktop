@@ -107,9 +107,8 @@ void TopBar::enableBackButton() {
 	_back->setDuration(st::infoTopBarDuration);
 	_back->toggle(!selectionMode(), anim::type::instant);
 	_back->entity()->clicks(
-	) | rpl::map([] {
-		return rpl::empty_value();
-	}) | rpl::start_to_stream(_backClicks, _back->lifetime());
+	) | rpl::to_empty
+	| rpl::start_to_stream(_backClicks, _back->lifetime());
 	registerToggleControlCallback(_back.data(), [=] {
 		return !selectionMode();
 	});
@@ -444,9 +443,8 @@ void TopBar::createSelectionControls() {
 		st::infoTopBarScale));
 	_cancelSelection->setDuration(st::infoTopBarDuration);
 	_cancelSelection->entity()->clicks(
-	) | rpl::map([] {
-		return rpl::empty_value();
-	}) | rpl::start_to_stream(
+	) | rpl::to_empty
+	| rpl::start_to_stream(
 		_cancelSelectionClicks,
 		_cancelSelection->lifetime());
 	_selectionText = wrap(Ui::CreateChild<Ui::FadeWrap<Ui::LabelWithNumbers>>(
@@ -480,10 +478,7 @@ void TopBar::createSelectionControls() {
 }
 
 bool TopBar::computeCanDelete() const {
-	return ranges::find_if(
-		_selectedItems.list,
-		[](const SelectedItem &item) { return !item.canDelete; }
-	) == _selectedItems.list.end();
+	return ranges::all_of(_selectedItems.list, &SelectedItem::canDelete);
 }
 
 Ui::StringWithNumbers TopBar::generateSelectedText() const {
@@ -580,7 +575,7 @@ rpl::producer<QString> TitleValue(
 		Unexpected("Bad peer type in Info::TitleValue()");
 
 	case Section::Type::Media:
-		if (peer->isSelf() && isStackBottom) {
+		if (peer->sharedMediaInfo() && isStackBottom) {
 			return tr::lng_profile_shared_media();
 		}
 		switch (section.mediaType()) {
@@ -605,6 +600,11 @@ rpl::producer<QString> TitleValue(
 		return tr::lng_profile_common_groups_section();
 
 	case Section::Type::Members:
+		if (const auto channel = peer->asChannel()) {
+			return channel->isMegagroup()
+				? tr::lng_profile_participants_section()
+				: tr::lng_profile_subscribers_section();
+		}
 		return tr::lng_profile_participants_section();
 
 	//case Section::Type::Channels: // #feed
@@ -624,10 +624,17 @@ rpl::producer<QString> TitleValue(
 			return tr::lng_settings_advanced();
 		case Section::SettingsType::Chat:
 			return tr::lng_settings_section_chat_settings();
+		case Section::SettingsType::Folders:
+			return tr::lng_filters_title();
 		case Section::SettingsType::Calls:
 			return tr::lng_settings_section_call_settings();
 		}
 		Unexpected("Bad settings type in Info::TitleValue()");
+
+	case Section::Type::PollResults:
+		return key.poll()->quiz()
+			? tr::lng_polls_quiz_results_title()
+			: tr::lng_polls_poll_results_title();
 	}
 	Unexpected("Bad section type in Info::TitleValue()");
 }

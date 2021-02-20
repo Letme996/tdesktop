@@ -1,7 +1,7 @@
 #define MyAppShortName "Telegram"
 #define MyAppName "Telegram Desktop"
 #define MyAppPublisher "Telegram FZ-LLC"
-#define MyAppURL "https://tdesktop.com"
+#define MyAppURL "https://desktop.telegram.org"
 #define MyAppExeName "Telegram.exe"
 #define MyAppId "53F49750-6209-4FBF-9CA8-7A333C87D1ED"
 
@@ -20,7 +20,6 @@ DefaultDirName={userappdata}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir={#ReleasePath}
-OutputBaseFilename=tsetup.{#MyAppVersionFull}
 SetupIconFile={#SourcePath}..\Resources\art\icon256.ico
 UninstallDisplayIcon={app}\Telegram.exe
 Compression=lzma
@@ -31,6 +30,14 @@ VersionInfoVersion={#MyAppVersion}.0
 CloseApplications=force
 DisableDirPage=no
 DisableProgramGroupPage=no
+
+#if MyBuildTarget == "win64"
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
+OutputBaseFilename=tsetup-x64.{#MyAppVersionFull}
+#else
+OutputBaseFilename=tsetup.{#MyAppVersionFull}
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

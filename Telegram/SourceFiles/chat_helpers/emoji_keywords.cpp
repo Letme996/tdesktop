@@ -7,13 +7,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "chat_helpers/emoji_keywords.h"
 
-#include "chat_helpers/emoji_suggestions_helper.h"
+#include "emoji_suggestions_helper.h"
 #include "lang/lang_instance.h"
 #include "lang/lang_cloud_manager.h"
 #include "core/application.h"
-#include "platform/platform_info.h"
+#include "base/platform/base_platform_info.h"
 #include "ui/emoji_config.h"
-#include "main/main_account.h"
+#include "main/main_domain.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
 
@@ -72,6 +72,12 @@ struct LangPackData {
 	return false;
 }
 
+[[nodiscard]] EmojiPtr FindExact(const QString &text) {
+	auto length = 0;
+	const auto result = Find(text, &length);
+	return (length < text.size()) ? nullptr : result;
+}
+
 void CreateCacheFilePath() {
 	QDir().mkpath(internal::CacheFileFolder() + qstr("/keywords"));
 }
@@ -120,7 +126,7 @@ void CreateCacheFilePath() {
 			const auto emoji = MustAddPostfix(text)
 				? (text + QChar(Ui::Emoji::kPostfix))
 				: text;
-			const auto entry = LangPackEmoji{ Find(emoji), text };
+			const auto entry = LangPackEmoji{ FindExact(emoji), text };
 			if (!entry.emoji) {
 				return {};
 			}
@@ -199,7 +205,7 @@ void AppendLegacySuggestions(
 			&& (ch != '-')
 			&& (ch != '+');
 	};
-	if (ranges::find_if(query, badSuggestionChar) != query.end()) {
+	if (ranges::any_of(query, badSuggestionChar)) {
 		return;
 	}
 
@@ -251,7 +257,7 @@ void ApplyDifference(
 				const auto emoji = MustAddPostfix(text)
 					? (text + QChar(Ui::Emoji::kPostfix))
 					: text;
-				return LangPackEmoji{ Find(emoji), text };
+				return LangPackEmoji{ FindExact(emoji), text };
 			}) | ranges::view::filter([&](const LangPackEmoji &entry) {
 				if (!entry.emoji) {
 					LOG(("API Warning: emoji %1 is not supported, word: %2."
@@ -429,7 +435,9 @@ void EmojiKeywords::LangPack::applyDifference(
 				LangPackData &&result) {
 			applyData(std::move(result));
 		});
-		crl::async([=, callback = std::move(callback)]() mutable {
+		crl::async([=,
+			copy = std::move(copy),
+			callback = std::move(callback)]() mutable {
 			ApplyDifference(copy, keywords, version);
 			WriteLocalCache(id, copy);
 			crl::on_main([
@@ -508,7 +516,7 @@ void EmojiKeywords::langPackRefreshed() {
 }
 
 void EmojiKeywords::handleSessionChanges() {
-	Core::App().activeAccount().sessionValue(
+	Core::App().domain().activeSessionValue( // #TODO multi someSessionValue
 	) | rpl::map([](Main::Session *session) {
 		return session ? &session->api() : nullptr;
 	}) | rpl::start_with_next([=](ApiWrap *api) {
@@ -519,7 +527,7 @@ void EmojiKeywords::handleSessionChanges() {
 void EmojiKeywords::apiChanged(ApiWrap *api) {
 	_api = api;
 	if (_api) {
-		crl::on_main(&Auth(), crl::guard(&_guard, [=] {
+		crl::on_main(&_api->session(), crl::guard(&_guard, [=] {
 			base::ObservableViewer(
 				Lang::CurrentCloudManager().firstLanguageSuggestion()
 			) | rpl::filter([=] {
@@ -549,7 +557,7 @@ void EmojiKeywords::refresh() {
 }
 
 std::vector<QString> EmojiKeywords::languages() {
-	if (!Main::Session::Exists()) {
+	if (!_api) {
 		return {};
 	}
 	refreshInputLanguages();
@@ -561,7 +569,7 @@ std::vector<QString> EmojiKeywords::languages() {
 	const auto yieldList = [&](const QStringList &list) {
 		result.insert(end(result), list.begin(), list.end());
 	};
-	yield(Lang::Current().id());
+	yield(Lang::Id());
 	yield(Lang::DefaultLanguageId());
 	yield(Lang::CurrentCloudManager().suggestedLanguage());
 	yield(Platform::SystemLanguage());

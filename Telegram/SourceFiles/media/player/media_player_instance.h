@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_shared_media.h"
 
 class AudioMsgId;
+class DocumentData;
 
 namespace Media {
 namespace Audio {
@@ -25,8 +26,8 @@ class PlaybackProgress;
 
 namespace Media {
 namespace Streaming {
-class Player;
-class Reader;
+class Document;
+class Instance;
 struct PlaybackOptions;
 struct Update;
 enum class Error;
@@ -36,13 +37,17 @@ enum class Error;
 namespace Media {
 namespace Player {
 
+class Instance;
+struct TrackState;
+
 void start(not_null<Audio::Instance*> instance);
 void finish(not_null<Audio::Instance*> instance);
 
-class Instance;
-Instance *instance();
+void SaveLastPlaybackPosition(
+	not_null<DocumentData*> document,
+	const TrackState &state);
 
-struct TrackState;
+not_null<Instance*> instance();
 
 class Instance : private base::Subscriber {
 public:
@@ -80,7 +85,7 @@ public:
 	void playPause(const AudioMsgId &audioId);
 	[[nodiscard]] TrackState getState(AudioMsgId::Type type) const;
 
-	[[nodiscard]] Streaming::Player *roundVideoPlayer(
+	[[nodiscard]] Streaming::Instance *roundVideoStreamed(
 		HistoryItem *item) const;
 	[[nodiscard]] View::PlaybackProgress *roundVideoPlayback(
 		HistoryItem *item) const;
@@ -143,16 +148,14 @@ public:
 
 	rpl::producer<> playlistChanges(AudioMsgId::Type type) const;
 
-	void playerWidgetToggledNotify(bool toggled) {
-		_playerWidgetToggled.fire_copy({toggled});
-	}
-	rpl::producer<bool> playerWidgetToggled() const {
-		return _playerWidgetToggled.events();
-	}
 	rpl::producer<TrackState> updatedNotifier() const {
 		return _updatedNotifier.events();
 	}
 
+	rpl::producer<> stops(AudioMsgId::Type type) const;
+	rpl::producer<> startsPlay(AudioMsgId::Type type) const;
+
+	bool pauseGifByRoundVideo() const;
 
 	void documentLoadProgress(DocumentData *document);
 
@@ -175,9 +178,11 @@ private:
 		std::optional<SliceKey> playlistRequestedKey;
 		std::optional<int> playlistIndex;
 		rpl::lifetime playlistLifetime;
+		rpl::lifetime sessionLifetime;
 		rpl::event_stream<> playlistChanges;
 		History *history = nullptr;
 		History *migrated = nullptr;
+		Main::Session *session = nullptr;
 		bool repeatEnabled = false;
 		bool isPlaying = false;
 		bool resumeOnCallEnd = false;
@@ -193,10 +198,10 @@ private:
 	void setupShortcuts();
 	void playStreamed(
 		const AudioMsgId &audioId,
-		std::shared_ptr<Streaming::Reader> reader);
+		std::shared_ptr<Streaming::Document> shared);
 	Streaming::PlaybackOptions streamingOptions(
 		const AudioMsgId &audioId,
-		crl::time position = 0);
+		crl::time position = -1);
 
 	// Observed notifications.
 	void handleSongUpdate(const AudioMsgId &audioId);
@@ -212,6 +217,7 @@ private:
 	void playlistUpdated(not_null<Data*> data);
 	bool moveInPlaylist(not_null<Data*> data, int delta, bool autonext);
 	HistoryItem *itemByIndex(not_null<Data*> data, int index);
+	void stopAndClear(not_null<Data*> data);
 
 	void handleStreamingUpdate(
 		not_null<Data*> data,
@@ -220,7 +226,7 @@ private:
 		not_null<Data*> data,
 		Streaming::Error &&error);
 
-	void clearStreamed(not_null<Data *> data);
+	void clearStreamed(not_null<Data*> data, bool savePosition = true);
 	void emitUpdate(AudioMsgId::Type type);
 	template <typename CheckCallback>
 	void emitUpdate(AudioMsgId::Type type, CheckCallback check);
@@ -247,8 +253,12 @@ private:
 	void requestRoundVideoResize() const;
 	void requestRoundVideoRepaint() const;
 
+	void setHistory(not_null<Data*> data, History *history);
+	void setSession(not_null<Data*> data, Main::Session *session);
+
 	Data _songData;
 	Data _voiceData;
+	bool _roundPlaying = false;
 
 	base::Observable<Switch> _switchToNextNotifier;
 	base::Observable<bool> _playerWidgetOver;
@@ -256,7 +266,8 @@ private:
 	base::Observable<AudioMsgId::Type> _trackChangedNotifier;
 	base::Observable<AudioMsgId::Type> _repeatChangedNotifier;
 
-	rpl::event_stream<bool> _playerWidgetToggled;
+	rpl::event_stream<AudioMsgId::Type> _playerStopped;
+	rpl::event_stream<AudioMsgId::Type> _playerStartedPlay;
 	rpl::event_stream<TrackState> _updatedNotifier;
 	rpl::lifetime _lifetime;
 

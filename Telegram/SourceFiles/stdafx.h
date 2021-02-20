@@ -8,10 +8,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #define __HUGE
 
-#ifdef OS_MAC_STORE
-#define MAC_USE_BREAKPAD
-#endif // OS_MAC_STORE
-
 #ifdef __cplusplus
 
 #include <cmath>
@@ -82,10 +78,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QtWidgets/QOpenGLWidget>
 #endif // OS_MAC_OLD
 
-// Fix Google Breakpad build for Mac App Store version
-#ifdef Q_OS_MAC
+// Fix Google Breakpad build for Mac App Store and Linux version
+#ifdef Q_OS_UNIX
 #define __STDC_FORMAT_MACROS
-#endif // Q_OS_MAC
+#endif // Q_OS_UNIX
+
+// Remove 'small' macro definition.
+#ifdef Q_OS_WIN
+#include <rpc.h>
+#ifdef small
+#undef small
+#endif // small
+#endif // Q_OS_WIN
 
 #include <array>
 #include <vector>
@@ -95,6 +99,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <unordered_set>
 #include <algorithm>
 #include <memory>
+#include <any>
 #include <optional>
 
 #include <range/v3/all.hpp>
@@ -120,7 +125,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/utils.h"
 #include "config.h"
 
-#include "mtproto/facade.h"
+#include "scheme.h"
+#include "mtproto/type_utils.h"
 
 #include "ui/style/style_core.h"
 #include "styles/palette.h"

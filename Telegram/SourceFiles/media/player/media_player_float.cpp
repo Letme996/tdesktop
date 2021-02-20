@@ -13,18 +13,22 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_media_types.h"
 #include "history/view/media/history_view_media.h"
 #include "history/history_item.h"
+#include "history/history.h"
 #include "history/view/history_view_element.h"
 #include "media/audio/media_audio.h"
-#include "media/streaming/media_streaming_player.h"
+#include "media/streaming/media_streaming_instance.h"
 #include "media/view/media_view_playback_progress.h"
 #include "media/player/media_player_instance.h"
 #include "window/window_session_controller.h"
 #include "window/section_widget.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 #include "main/main_session.h"
+#include "main/main_account.h"
 #include "facades.h"
 #include "app.h"
 #include "styles/style_media_player.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 #include <QtWidgets/QApplication>
 
@@ -33,12 +37,10 @@ namespace Player {
 
 Float::Float(
 	QWidget *parent,
-	not_null<Window::SessionController*> controller,
 	not_null<HistoryItem*> item,
 	Fn<void(bool visible)> toggleCallback,
 	Fn<void(bool closed)> draggedCallback)
 : RpWidget(parent)
-, _controller(controller)
 , _item(item)
 , _toggleCallback(std::move(toggleCallback))
 , _draggedCallback(std::move(draggedCallback)) {
@@ -55,18 +57,23 @@ Float::Float(
 
 	prepareShadow();
 
-	_controller->session().data().itemRepaintRequest(
+	document->session().data().itemRepaintRequest(
 	) | rpl::start_with_next([this](auto item) {
 		if (_item == item) {
 			repaintItem();
 		}
 	}, lifetime());
 
-	_controller->session().data().itemRemoved(
+	document->session().data().itemRemoved(
 	) | rpl::start_with_next([this](auto item) {
 		if (_item == item) {
 			detach();
 		}
+	}, lifetime());
+
+	document->session().account().sessionChanges(
+	) | rpl::start_with_next([=] {
+		detach();
 	}, lifetime());
 
 	setCursor(style::cur_pointer);
@@ -104,7 +111,7 @@ float64 Float::outRatio() const {
 	if (y() + height() > parent.y() + parent.height()) {
 		accumulate_min(min, 1. - (y() + height() - parent.y() - parent.height()) / float64(height()));
 	}
-	return snap(min, 0., 1.);
+	return std::clamp(min, 0., 1.);
 }
 
 void Float::mouseReleaseEvent(QMouseEvent *e) {
@@ -132,11 +139,11 @@ void Float::mouseDoubleClickEvent(QMouseEvent *e) {
 }
 
 void Float::pauseResume() {
-	if (const auto player = instance()->roundVideoPlayer(_item)) {
-		if (player->paused()) {
-			player->resume();
+	if (const auto streamed = getStreamed()) {
+		if (streamed->paused()) {
+			streamed->resume();
 		} else {
-			player->pause();
+			streamed->pause();
 		}
 	}
 }
@@ -206,8 +213,8 @@ void Float::paintEvent(QPaintEvent *e) {
 	}
 }
 
-Streaming::Player *Float::getPlayer() const {
-	return instance()->roundVideoPlayer(_item);
+Streaming::Instance *Float::getStreamed() const {
+	return instance()->roundVideoStreamed(_item);
 }
 
 View::PlaybackProgress *Float::getPlayback() const {
@@ -215,7 +222,7 @@ View::PlaybackProgress *Float::getPlayback() const {
 }
 
 bool Float::hasFrame() const {
-	return (getPlayer() != nullptr);
+	return (getStreamed() != nullptr);
 }
 
 bool Float::fillFrame() {
@@ -229,11 +236,11 @@ bool Float::fillFrame() {
 	auto frameInner = [&] {
 		return QRect(QPoint(), _frame.size() / cIntRetinaFactor());
 	};
-	if (const auto player = getPlayer()) {
+	if (const auto streamed = getStreamed()) {
 		auto request = Streaming::FrameRequest::NonStrict();
 		request.outer = request.resize = _frame.size();
 		request.radius = ImageRoundRadius::Ellipse;
-		auto frame = player->frame(request);
+		auto frame = streamed->frame(request);
 		if (!frame.isNull()) {
 			_frame.fill(Qt::transparent);
 
@@ -266,7 +273,6 @@ void Float::repaintItem() {
 template <typename ToggleCallback, typename DraggedCallback>
 FloatController::Item::Item(
 	not_null<QWidget*> parent,
-	not_null<Window::SessionController*> controller,
 	not_null<HistoryItem*> item,
 	ToggleCallback toggle,
 	DraggedCallback dragged)
@@ -275,7 +281,6 @@ FloatController::Item::Item(
 , corner(RectPart::TopRight)
 , widget(
 	parent,
-	controller,
 	item,
 	[=, toggle = std::move(toggle)](bool visible) {
 		toggle(this, visible);
@@ -287,12 +292,7 @@ FloatController::Item::Item(
 
 FloatController::FloatController(not_null<FloatDelegate*> delegate)
 : _delegate(delegate)
-, _parent(_delegate->floatPlayerWidget())
-, _controller(_delegate->floatPlayerController()) {
-	subscribe(_controller->floatPlayerAreaUpdated(), [=] {
-		checkVisibility();
-	});
-
+, _parent(_delegate->floatPlayerWidget()) {
 	subscribe(Media::Player::instance()->trackChangedNotifier(), [=](
 			AudioMsgId::Type type) {
 		if (type == AudioMsgId::Type::Voice) {
@@ -308,9 +308,6 @@ void FloatController::replaceDelegate(not_null<FloatDelegate*> delegate) {
 
 	_delegate = delegate;
 	_parent = _delegate->floatPlayerWidget();
-
-	// Currently moving floats between windows is not supported.
-	Assert(_controller == _delegate->floatPlayerController());
 
 	startDelegateHandling();
 
@@ -351,21 +348,32 @@ void FloatController::startDelegateHandling() {
 			const FloatDelegate::FloatPlayerFilterWheelEventRequest &request) {
 		*request.result = filterWheelEvent(request.object, request.event);
 	}, _delegateLifetime);
+
+	_delegate->floatPlayerAreaUpdates(
+	) | rpl::start_with_next([=] {
+		checkVisibility();
+	}, _delegateLifetime);
 }
 
 void FloatController::checkCurrent() {
 	const auto state = Media::Player::instance()->current(AudioMsgId::Type::Voice);
+	const auto audio = state.audio();
 	const auto fullId = state.contextId();
 	const auto last = current();
 	if (last
+		&& audio
 		&& !last->widget->detached()
-		&& last->widget->item()->fullId() == fullId) {
+		&& (&last->widget->item()->history()->session() == &audio->session())
+		&& (last->widget->item()->fullId() == fullId)) {
 		return;
 	}
 	if (last) {
 		last->widget->detach();
 	}
-	if (const auto item = _controller->session().data().message(fullId)) {
+	if (!audio) {
+		return;
+	}
+	if (const auto item = audio->session().data().message(fullId)) {
 		if (const auto media = item->media()) {
 			if (const auto document = media->document()) {
 				if (document->isVideoMessage()) {
@@ -379,7 +387,6 @@ void FloatController::checkCurrent() {
 void FloatController::create(not_null<HistoryItem*> item) {
 	_items.push_back(std::make_unique<Item>(
 		_parent,
-		_controller,
 		item,
 		[=](not_null<Item*> instance, bool visible) {
 			instance->hiddenByWidget = !visible;
@@ -388,8 +395,8 @@ void FloatController::create(not_null<HistoryItem*> item) {
 		[=](not_null<Item*> instance, bool closed) {
 			finishDrag(instance, closed);
 		}));
-	current()->column = _controller->session().settings().floatPlayerColumn();
-	current()->corner = _controller->session().settings().floatPlayerCorner();
+	current()->column = Core::App().settings().floatPlayerColumn();
+	current()->corner = Core::App().settings().floatPlayerCorner();
 	checkVisibility();
 }
 
@@ -456,7 +463,7 @@ std::optional<bool> FloatController::filterWheelEvent(
 		if (instance->widget == object) {
 			const auto section = _delegate->floatPlayerGetSection(
 				instance->column);
-			return section->wheelEventFromFloatPlayer(event);
+			return section->floatPlayerHandleWheelEvent(event);
 		}
 	}
 	return std::nullopt;
@@ -516,7 +523,7 @@ QPoint FloatController::getHiddenPosition(
 
 QPoint FloatController::getPosition(not_null<Item*> instance) const {
 	const auto section = _delegate->floatPlayerGetSection(instance->column);
-	const auto rect = section->rectForFloatPlayer();
+	const auto rect = section->floatPlayerAvailableRect();
 	auto position = rect.topLeft();
 	if (IsBottomCorner(instance->corner)) {
 		position.setY(position.y() + rect.height() - instance->widget->height());
@@ -562,12 +569,13 @@ void FloatController::updateColumnCorner(QPoint center) {
 
 	auto size = _items.back()->widget->size();
 	auto min = INT_MAX;
-	auto column = _controller->session().settings().floatPlayerColumn();
-	auto corner = _controller->session().settings().floatPlayerCorner();
+	auto column = Core::App().settings().floatPlayerColumn();
+	auto corner = Core::App().settings().floatPlayerCorner();
 	auto checkSection = [&](
-			not_null<Window::AbstractSectionWidget*> widget,
+			not_null<FloatSectionDelegate*> widget,
 			Window::Column widgetColumn) {
-		auto rect = _parent->mapFromGlobal(widget->rectForFloatPlayer());
+		auto rect = _parent->mapFromGlobal(
+			widget->floatPlayerAvailableRect());
 		auto left = rect.x() + (size.width() / 2);
 		auto right = rect.x() + rect.width() - (size.width() / 2);
 		auto top = rect.y() + (size.height() / 2);
@@ -588,13 +596,14 @@ void FloatController::updateColumnCorner(QPoint center) {
 
 	_delegate->floatPlayerEnumerateSections(checkSection);
 
-	if (_controller->session().settings().floatPlayerColumn() != column) {
-		_controller->session().settings().setFloatPlayerColumn(column);
-		_controller->session().saveSettingsDelayed();
+	auto &settings = Core::App().settings();
+	if (settings.floatPlayerColumn() != column) {
+		settings.setFloatPlayerColumn(column);
+		Core::App().saveSettingsDelayed();
 	}
-	if (_controller->session().settings().floatPlayerCorner() != corner) {
-		_controller->session().settings().setFloatPlayerCorner(corner);
-		_controller->session().saveSettingsDelayed();
+	if (settings.floatPlayerCorner() != corner) {
+		settings.setFloatPlayerCorner(corner);
+		Core::App().saveSettingsDelayed();
 	}
 }
 
@@ -606,8 +615,8 @@ void FloatController::finishDrag(not_null<Item*> instance, bool closed) {
 		instance->animationSide = getSide(center);
 	}
 	updateColumnCorner(center);
-	instance->column = _controller->session().settings().floatPlayerColumn();
-	instance->corner = _controller->session().settings().floatPlayerCorner();
+	instance->column = Core::App().settings().floatPlayerColumn();
+	instance->corner = Core::App().settings().floatPlayerCorner();
 
 	instance->draggedAnimation.stop();
 	instance->draggedAnimation.start(
@@ -623,6 +632,7 @@ void FloatController::finishDrag(not_null<Item*> instance, bool closed) {
 			_closeEvents.fire(item->fullId());
 		}
 		instance->widget->detach();
+		Media::Player::instance()->stop(AudioMsgId::Type::Voice);
 	}
 }
 

@@ -12,7 +12,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/shadow.h"
 #include "boxes/edit_color_box.h"
 #include "lang/lang_keys.h"
-#include "facades.h"
+#include "base/call_delayed.h"
+#include "base/qt_adapters.h"
 
 namespace Window {
 namespace Theme {
@@ -154,7 +155,7 @@ void EditorBlock::Row::fillSearchIndex() {
 	_searchWords.clear();
 	_searchStartChars.clear();
 	auto toIndex = _name + ' ' + _copyOf + ' ' + TextUtilities::RemoveAccents(_description.toString()) + ' ' + _valueString;
-	auto words = toIndex.toLower().split(SearchSplitter, QString::SkipEmptyParts);
+	auto words = toIndex.toLower().split(SearchSplitter, base::QStringSkipEmptyParts);
 	for_const (auto &word, words) {
 		_searchWords.insert(word);
 		_searchStartChars.insert(word[0]);
@@ -238,6 +239,7 @@ void EditorBlock::removeRow(const QString &name, bool removeCopyReferences) {
 			row.setCopyOf(QString());
 		}
 	}
+	removeFromSearch(_data[index]);
 	_data.erase(_data.begin() + index);
 	_indices.erase(it);
 	for (auto i = index, count = static_cast<int>(_data.size()); i != count; ++i) {
@@ -444,7 +446,7 @@ void EditorBlock::enumerateRows(Callback callback) const {
 			}
 		}
 	} else {
-		for_const (auto &row, _data) {
+		for (const auto &row : _data) {
 			if (!callback(row)) {
 				break;
 			}
@@ -522,7 +524,7 @@ void EditorBlock::mouseReleaseEvent(QMouseEvent *e) {
 		if (_context->box) {
 			chooseRow();
 		} else if (_selected >= 0) {
-			App::CallDelayed(st::defaultRippleAnimation.hideDuration, this, [this, index = findRowIndex(&rowAtIndex(_selected))] {
+			base::call_delayed(st::defaultRippleAnimation.hideDuration, this, [this, index = findRowIndex(&rowAtIndex(_selected))] {
 				if (index >= 0 && index < _data.size()) {
 					activateRow(_data[index]);
 				}

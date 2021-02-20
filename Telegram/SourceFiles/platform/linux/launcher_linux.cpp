@@ -7,9 +7,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/linux/launcher_linux.h"
 
-#include "platform/platform_info.h"
+#include "platform/linux/specific_linux.h"
 #include "core/crash_reports.h"
 #include "core/update_checker.h"
+
+#include <QtWidgets/QApplication>
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -43,7 +45,12 @@ private:
 } // namespace
 
 Launcher::Launcher(int argc, char *argv[])
-: Core::Launcher(argc, argv, DeviceModelPretty(), SystemVersionPretty()) {
+: Core::Launcher(argc, argv) {
+}
+
+void Launcher::initHook() {
+	QApplication::setAttribute(Qt::AA_DisableSessionManager, true);
+	QApplication::setDesktopFileName(GetLauncherFilename());
 }
 
 bool Launcher::launchUpdater(UpdaterLaunch action) {
@@ -66,9 +73,6 @@ bool Launcher::launchUpdater(UpdaterLaunch action) {
 	}
 	if (cStartInTray()) {
 		argumentsList.push("-startintray");
-	}
-	if (cTestMode()) {
-		argumentsList.push("-testmode");
 	}
 #ifndef TDESKTOP_DISABLE_AUTOUPDATE
 	if (Core::UpdaterDisabled()) {

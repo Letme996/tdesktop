@@ -10,24 +10,29 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/themes/window_theme_preview.h"
 #include "window/themes/window_themes_embedded.h"
 #include "window/themes/window_theme_editor.h"
+#include "window/window_controller.h"
+#include "platform/platform_specific.h"
 #include "mainwidget.h"
 #include "main/main_session.h"
 #include "apiwrap.h"
 #include "storage/localstorage.h"
 #include "storage/localimageloader.h"
 #include "storage/file_upload.h"
+#include "base/openssl_help.h"
 #include "base/parse_helper.h"
 #include "base/zlib_help.h"
 #include "base/unixtime.h"
 #include "base/crc32hash.h"
 #include "data/data_session.h"
-#include "main/main_account.h" // Account::sessionValue.
+#include "main/main_account.h" // Account::local.
+#include "main/main_domain.h" // Domain::activeSessionValue.
 #include "ui/image/image.h"
+#include "boxes/confirm_box.h"
 #include "boxes/background_box.h"
 #include "core/application.h"
 #include "app.h"
 #include "styles/style_widgets.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 #include <QtCore/QBuffer>
 
@@ -37,7 +42,7 @@ namespace {
 
 constexpr auto kThemeFileSizeLimit = 5 * 1024 * 1024;
 constexpr auto kBackgroundSizeLimit = 25 * 1024 * 1024;
-constexpr auto kNightThemeFile = str_const(":/gui/night.tdesktop-theme");
+constexpr auto kNightThemeFile = ":/gui/night.tdesktop-theme"_cs;
 constexpr auto kMinimumTiledSize = 512;
 
 struct Applying {
@@ -438,7 +443,7 @@ void ClearApplying() {
 	GlobalApplying = Applying();
 }
 
-SendMediaReady PrepareWallPaper(const QImage &image) {
+SendMediaReady PrepareWallPaper(MTP::DcId dcId, const QImage &image) {
 	PreparedPhotoThumbs thumbnails;
 	QVector<MTPPhotoSize> sizes;
 
@@ -459,7 +464,9 @@ SendMediaReady PrepareWallPaper(const QImage &image) {
 			MTP_fileLocationToBeDeprecated(MTP_long(0), MTP_int(0)),
 			MTP_int(image.width()),
 			MTP_int(image.height()), MTP_int(0)));
-		thumbnails.emplace(type[0], std::move(image));
+		thumbnails.emplace(
+			type[0],
+			PreparedPhotoThumb{ .image = std::move(image) });
 	};
 	push("s", scaled(320));
 
@@ -470,7 +477,7 @@ SendMediaReady PrepareWallPaper(const QImage &image) {
 	attributes.push_back(MTP_documentAttributeImageSize(
 		MTP_int(image.width()),
 		MTP_int(image.height())));
-	const auto id = rand_value<DocumentId>();
+	const auto id = openssl::RandomValue<DocumentId>();
 	const auto document = MTP_document(
 		MTP_flags(0),
 		MTP_long(id),
@@ -480,7 +487,8 @@ SendMediaReady PrepareWallPaper(const QImage &image) {
 		MTP_string("image/jpeg"),
 		MTP_int(jpeg.size()),
 		MTP_vector<MTPPhotoSize>(sizes),
-		MTP_int(MTP::maindc()),
+		MTPVector<MTPVideoSize>(),
+		MTP_int(dcId),
 		MTP_vector<MTPDocumentAttribute>(attributes));
 
 	return SendMediaReady(
@@ -519,13 +527,6 @@ ChatBackground::ChatBackground() : _adjustableColors({
 		st::historyScrollBgOver,
 		st::historyScrollBarBg,
 		st::historyScrollBarBgOver }) {
-	saveAdjustableColors();
-
-	subscribe(this, [=](const BackgroundUpdate &update) {
-		if (update.paletteChanged()) {
-			style::NotifyPaletteChanged();
-		}
-	});
 }
 
 void ChatBackground::setThemeData(QImage &&themeImage, bool themeTile) {
@@ -533,21 +534,40 @@ void ChatBackground::setThemeData(QImage &&themeImage, bool themeTile) {
 	_themeTile = themeTile;
 }
 
-void ChatBackground::start() {
-	if (!Data::details::IsUninitializedWallPaper(_paper)) {
+void ChatBackground::initialRead() {
+	if (started()) {
 		return;
-	}
-	if (!Local::readBackground()) {
+	} else if (!Local::readBackground()) {
 		set(Data::ThemeWallPaper());
 	}
+	if (_localStoredTileDayValue) {
+		_tileDayValue = *_localStoredTileDayValue;
+	}
+	if (_localStoredTileNightValue) {
+		_tileNightValue = *_localStoredTileNightValue;
+	}
+}
 
-	Core::App().activeAccount().sessionValue(
+void ChatBackground::start() {
+	saveAdjustableColors();
+
+	subscribe(this, [=](const BackgroundUpdate &update) {
+		if (update.paletteChanged()) {
+			style::NotifyPaletteChanged();
+		}
+	});
+
+	initialRead();
+
+	Core::App().domain().activeSessionValue(
 	) | rpl::filter([=](Main::Session *session) {
 		return session != _session;
 	}) | rpl::start_with_next([=](Main::Session *session) {
 		_session = session;
 		checkUploadWallPaper();
 	}, _lifetime);
+
+	Core::App().settings().setSystemDarkMode(Platform::IsDarkMode());
 }
 
 void ChatBackground::checkUploadWallPaper() {
@@ -569,7 +589,7 @@ void ChatBackground::checkUploadWallPaper() {
 		return;
 	}
 
-	const auto ready = PrepareWallPaper(_original);
+	const auto ready = PrepareWallPaper(_session->mainDcId(), _original);
 	const auto documentId = ready.id;
 	_wallPaperUploadId = FullMsgId(0, _session->data().nextLocalMessageId());
 	_session->uploader().uploadMedia(_wallPaperUploadId, ready);
@@ -593,8 +613,11 @@ void ChatBackground::checkUploadWallPaper() {
 				_session->data().documentConvert(
 					_session->data().document(documentId),
 					data.vdocument());
+			}, [&](const MTPDwallPaperNoFile &data) {
+				LOG(("API Error: "
+					"Got wallPaperNoFile after account.UploadWallPaper."));
 			});
-			if (const auto paper = Data::WallPaper::Create(result)) {
+			if (const auto paper = Data::WallPaper::Create(_session, result)) {
 				setPaper(*paper);
 				writeNewBackgroundSettings();
 				notify(BackgroundUpdate(BackgroundUpdate::Type::New, tile()));
@@ -846,16 +869,9 @@ bool ChatBackground::isMonoColorImage() const {
 	return _isMonoColorImage;
 }
 
-void ChatBackground::ensureStarted() {
-	if (_pixmap.isNull() && !_paper.backgroundColor()) {
-		// We should start first, otherwise the default call
-		// to start() will reset this value to _themeTile.
-		start();
-	}
-}
-
 void ChatBackground::setTile(bool tile) {
-	ensureStarted();
+	Expects(started());
+
 	const auto old = this->tile();
 	if (nightMode()) {
 		setTileNightValue(tile);
@@ -865,20 +881,26 @@ void ChatBackground::setTile(bool tile) {
 	if (this->tile() != old) {
 		if (!Data::details::IsTestingThemeWallPaper(_paper)
 			&& !Data::details::IsTestingDefaultWallPaper(_paper)) {
-			Local::writeUserSettings();
+			Local::writeSettings();
 		}
 		notify(BackgroundUpdate(BackgroundUpdate::Type::Changed, tile));
 	}
 }
 
 void ChatBackground::setTileDayValue(bool tile) {
-	ensureStarted();
-	_tileDayValue = tile;
+	if (started()) {
+		_tileDayValue = tile;
+	} else {
+		_localStoredTileDayValue = tile;
+	}
 }
 
 void ChatBackground::setTileNightValue(bool tile) {
-	ensureStarted();
-	_tileNightValue = tile;
+	if (started()) {
+		_tileNightValue = tile;
+	} else {
+		_localStoredTileNightValue = tile;
+	}
 }
 
 void ChatBackground::setThemeObject(const Object &object) {
@@ -908,10 +930,16 @@ void ChatBackground::reset() {
 		notify(BackgroundUpdate(BackgroundUpdate::Type::TestingTheme, tile()), true);
 		notify(BackgroundUpdate(BackgroundUpdate::Type::ApplyingTheme, tile()), true);
 	}
+	writeNewBackgroundSettings();
+}
+
+bool ChatBackground::started() const {
+	return !Data::details::IsUninitializedWallPaper(_paper);
 }
 
 void ChatBackground::saveForRevert() {
-	ensureStarted();
+	Expects(started());
+
 	if (!Data::details::IsTestingThemeWallPaper(_paper)
 		&& !Data::details::IsTestingDefaultWallPaper(_paper)) {
 		_paperForRevert = _paper;
@@ -1003,7 +1031,7 @@ void ChatBackground::keepApplied(const Object &object, bool write) {
 }
 
 bool ChatBackground::isNonDefaultThemeOrBackground() {
-	start();
+	initialRead();
 	return nightMode()
 		? (_themeObject.pathAbsolute != NightThemePath()
 			|| !Data::IsThemeWallPaper(_paper))
@@ -1012,7 +1040,7 @@ bool ChatBackground::isNonDefaultThemeOrBackground() {
 }
 
 bool ChatBackground::isNonDefaultBackground() {
-	start();
+	initialRead();
 	return _themeObject.pathAbsolute.isEmpty()
 		? !Data::IsDefaultWallPaper(_paper)
 		: !Data::IsThemeWallPaper(_paper);
@@ -1020,7 +1048,7 @@ bool ChatBackground::isNonDefaultBackground() {
 
 void ChatBackground::writeNewBackgroundSettings() {
 	if (tile() != _tileForRevert) {
-		Local::writeUserSettings();
+		Local::writeSettings();
 	}
 	Local::writeBackground(
 		_paper,
@@ -1054,6 +1082,14 @@ bool ChatBackground::nightMode() const {
 void ChatBackground::reapplyWithNightMode(
 		std::optional<QString> themePath,
 		bool newNightMode) {
+	if (!started()) {
+		// We can get here from legacy passcoded state.
+		// In this case Background() is not started yet, because
+		// some settings and the background itself were not read.
+		return;
+	} else if (_nightMode != newNightMode && !nightModeChangeAllowed()) {
+		return;
+	}
 	const auto settingExactTheme = themePath.has_value();
 	const auto nightModeChanged = (newNightMode != _nightMode);
 	const auto oldNightMode = _nightMode;
@@ -1106,10 +1142,7 @@ void ChatBackground::reapplyWithNightMode(
 			}
 			ClearApplying();
 			keepApplied(saved.object, settingExactTheme);
-			if (tile() != _tileForRevert) {
-				Local::writeUserSettings();
-			}
-			if (nightModeChanged) {
+			if (tile() != _tileForRevert || nightModeChanged) {
 				Local::writeSettings();
 			}
 			if (!settingExactTheme && !Local::readBackground()) {
@@ -1117,6 +1150,14 @@ void ChatBackground::reapplyWithNightMode(
 			}
 		};
 	}
+}
+
+bool ChatBackground::nightModeChangeAllowed() const {
+	const auto &settings = Core::App().settings();
+	const auto allowedToBeAfterChange = settings.systemDarkModeEnabled()
+		? settings.systemDarkMode().value_or(!_nightMode)
+		: !_nightMode;
+	return (_nightMode != allowedToBeAfterChange);
 }
 
 void ChatBackground::toggleNightMode(std::optional<QString> themePath) {
@@ -1251,7 +1292,7 @@ void Revert() {
 }
 
 QString NightThemePath() {
-	return str_const_toString(kNightThemeFile);
+	return kNightThemeFile.utf16();
 }
 
 bool IsNonDefaultBackground() {
@@ -1274,6 +1315,25 @@ void ToggleNightMode() {
 
 void ToggleNightMode(const QString &path) {
 	Background()->toggleNightMode(path);
+}
+
+void ToggleNightModeWithConfirmation(
+		not_null<Controller*> window,
+		Fn<void()> toggle) {
+	if (Background()->nightModeChangeAllowed()) {
+		toggle();
+	} else {
+		const auto disableAndToggle = [=](Fn<void()> &&close) {
+			Core::App().settings().setSystemDarkModeEnabled(false);
+			Core::App().saveSettingsDelayed();
+			toggle();
+			close();
+		};
+		window->show(Box<ConfirmBox>(
+			tr::lng_settings_auto_night_warning(tr::now),
+			tr::lng_settings_auto_night_disable(tr::now),
+			disableAndToggle));
+	}
 }
 
 void ResetToSomeDefault() {

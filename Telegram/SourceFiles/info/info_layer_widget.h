@@ -7,7 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "window/layer_widget.h"
+#include "ui/layers/layer_widget.h"
 #include "media/player/media_player_float.h"
 
 namespace Window {
@@ -22,7 +22,7 @@ class WrapWidget;
 class TopBar;
 
 class LayerWidget
-	: public Window::LayerWidget
+	: public Ui::LayerWidget
 	, private ::Media::Player::FloatDelegate {
 public:
 	LayerWidget(
@@ -58,11 +58,10 @@ private:
 	void restoreFloatPlayerDelegate();
 	not_null<::Media::Player::FloatDelegate*> floatPlayerDelegate();
 	not_null<Ui::RpWidget*> floatPlayerWidget() override;
-	not_null<Window::SessionController*> floatPlayerController() override;
-	not_null<Window::AbstractSectionWidget*> floatPlayerGetSection(
+	not_null<::Media::Player::FloatSectionDelegate*> floatPlayerGetSection(
 		Window::Column column) override;
 	void floatPlayerEnumerateSections(Fn<void(
-		not_null<Window::AbstractSectionWidget*> widget,
+		not_null<::Media::Player::FloatSectionDelegate*> widget,
 		Window::Column widgetColumn)> callback) override;
 	bool floatPlayerIsVisible(not_null<HistoryItem*> item) override;
 

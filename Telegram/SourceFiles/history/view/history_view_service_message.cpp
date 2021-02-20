@@ -15,13 +15,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_abstract_structure.h"
 #include "data/data_chat.h"
 #include "data/data_channel.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
+#include "core/core_settings.h"
+#include "core/application.h"
 #include "mainwidget.h"
 #include "layout.h"
 #include "lang/lang_keys.h"
-#include "facades.h"
 #include "app.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 namespace HistoryView {
 namespace {
@@ -164,7 +165,7 @@ void paintBubblePart(Painter &p, int x, int y, int width, int height, SideStyle 
 void paintPreparedDate(Painter &p, const QString &dateText, int dateTextWidth, int y, int w) {
 	int left = st::msgServiceMargin.left();
 	int maxwidth = w;
-	if (Adaptive::ChatWide()) {
+	if (Core::App().settings().chatWide()) {
 		maxwidth = qMin(maxwidth, WideChatWidth());
 	}
 	w = maxwidth - st::msgServiceMargin.left() - st::msgServiceMargin.left();
@@ -197,6 +198,10 @@ void ServiceMessagePainter::paintDate(Painter &p, const QDateTime &date, int y, 
 	auto dateText = langDayOfMonthFull(date.date());
 	auto dateTextWidth = st::msgServiceFont->width(dateText);
 	paintPreparedDate(p, dateText, dateTextWidth, y, w);
+}
+
+void ServiceMessagePainter::paintDate(Painter &p, const QString &dateText, int y, int w) {
+	paintPreparedDate(p, dateText, st::msgServiceFont->width(dateText), y, w);
 }
 
 void ServiceMessagePainter::paintDate(Painter &p, const QString &dateText, int dateTextWidth, int y, int w) {
@@ -305,8 +310,9 @@ void serviceColorsUpdated() {
 
 Service::Service(
 	not_null<ElementDelegate*> delegate,
-	not_null<HistoryService*> data)
-: Element(delegate, data) {
+	not_null<HistoryService*> data,
+	Element *replacing)
+: Element(delegate, data, replacing) {
 }
 
 not_null<HistoryService*> Service::message() const {
@@ -315,7 +321,7 @@ not_null<HistoryService*> Service::message() const {
 
 QRect Service::countGeometry() const {
 	auto result = QRect(0, 0, width(), height());
-	if (Adaptive::ChatWide()) {
+	if (Core::App().settings().chatWide()) {
 		result.setWidth(qMin(result.width(), st::msgMaxWidth + 2 * st::msgPhotoSkip + 2 * st::msgMargin.left()));
 	}
 	return result.marginsRemoved(st::msgServiceMargin);
@@ -338,7 +344,7 @@ QSize Service::performCountCurrentSize(int newWidth) {
 		item->_textHeight = 0;
 	} else {
 		auto contentWidth = newWidth;
-		if (Adaptive::ChatWide()) {
+		if (Core::App().settings().chatWide()) {
 			accumulate_min(contentWidth, st::msgMaxWidth + 2 * st::msgPhotoSkip + 2 * st::msgMargin.left());
 		}
 		contentWidth -= st::msgServiceMargin.left() + st::msgServiceMargin.left(); // two small margins

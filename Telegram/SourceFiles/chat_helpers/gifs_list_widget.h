@@ -14,6 +14,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <QtCore/QTimer>
 
+namespace Api {
+struct SendOptions;
+} // namespace Api
+
 namespace InlineBots {
 namespace Layout {
 class ItemBase;
@@ -22,6 +26,7 @@ class Result;
 } // namespace InlineBots
 
 namespace Ui {
+class PopupMenu;
 class RoundButton;
 } // namespace Ui
 
@@ -29,20 +34,25 @@ namespace Window {
 class SessionController;
 } // namespace Window
 
+namespace SendMenu {
+enum class Type;
+} // namespace SendMenu
+
 namespace ChatHelpers {
+
+void DeleteSavedGif(not_null<DocumentData*> document);
 
 class GifsListWidget
 	: public TabbedSelector::Inner
 	, public InlineBots::Layout::Context
-	, private base::Subscriber
-	, private MTP::Sender {
+	, private base::Subscriber {
 public:
 	using InlineChosen = TabbedSelector::InlineChosen;
 
 	GifsListWidget(QWidget *parent, not_null<Window::SessionController*> controller);
 
-	rpl::producer<not_null<DocumentData*>> fileChosen() const;
-	rpl::producer<not_null<PhotoData*>> photoChosen() const;
+	rpl::producer<TabbedSelector::FileChosen> fileChosen() const;
+	rpl::producer<TabbedSelector::PhotoChosen> photoChosen() const;
 	rpl::producer<InlineChosen> inlineResultChosen() const;
 
 	void refreshRecent() override;
@@ -66,6 +76,10 @@ public:
 
 	void cancelled();
 	rpl::producer<> cancelRequests() const;
+
+	void fillContextMenu(
+		not_null<Ui::PopupMenu*> menu,
+		SendMenu::Type type) override;
 
 	~GifsListWidget();
 
@@ -103,6 +117,7 @@ private:
 		InlineResults results;
 	};
 
+	void clearHeavyData();
 	void cancelGifsSearch();
 	void switchToSavedGifs();
 	void refreshSavedGifs();
@@ -119,6 +134,8 @@ private:
 	void updateInlineItems();
 	void showPreview();
 
+	MTP::Sender _api;
+
 	Section _section = Section::Gifs;
 	crl::time _lastScrolled = 0;
 	base::Timer _updateInlineItems;
@@ -132,11 +149,19 @@ private:
 	QVector<Row> _rows;
 	void clearInlineRows(bool resultsDeleted);
 
-	std::map<DocumentData*, std::unique_ptr<LayoutItem>> _gifLayouts;
-	LayoutItem *layoutPrepareSavedGif(DocumentData *doc, int32 position);
+	std::map<
+		not_null<DocumentData*>,
+		std::unique_ptr<LayoutItem>> _gifLayouts;
+	LayoutItem *layoutPrepareSavedGif(
+		not_null<DocumentData*> document,
+		int32 position);
 
-	std::map<InlineResult*, std::unique_ptr<LayoutItem>> _inlineLayouts;
-	LayoutItem *layoutPrepareInlineResult(InlineResult *result, int32 position);
+	std::map<
+		not_null<InlineResult*>,
+		std::unique_ptr<LayoutItem>> _inlineLayouts;
+	LayoutItem *layoutPrepareInlineResult(
+		not_null<InlineResult*> result,
+		int32 position);
 
 	bool inlineRowsAddItem(DocumentData *savedGif, InlineResult *result, Row &row, int32 &sumWidth);
 	bool inlineRowFinalize(Row &row, int32 &sumWidth, bool force = false);
@@ -148,6 +173,11 @@ private:
 
 	int validateExistingInlineRows(const InlineResults &results);
 	void selectInlineResult(int row, int column);
+	void selectInlineResult(
+		int row,
+		int column,
+		Api::SendOptions options,
+		bool forceSend = false);
 
 	Footer *_footer = nullptr;
 
@@ -167,8 +197,8 @@ private:
 	QString _inlineQuery, _inlineNextQuery, _inlineNextOffset;
 	mtpRequestId _inlineRequestId = 0;
 
-	rpl::event_stream<not_null<DocumentData*>> _fileChosen;
-	rpl::event_stream<not_null<PhotoData*>> _photoChosen;
+	rpl::event_stream<TabbedSelector::FileChosen> _fileChosen;
+	rpl::event_stream<TabbedSelector::PhotoChosen> _photoChosen;
 	rpl::event_stream<InlineChosen> _inlineResultChosen;
 	rpl::event_stream<> _cancelled;
 

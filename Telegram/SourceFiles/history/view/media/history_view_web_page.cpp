@@ -7,8 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/media/history_view_web_page.h"
 
-#include "layout.h"
 #include "core/click_handler_types.h"
+#include "core/ui_integration.h"
 #include "lang/lang_keys.h"
 #include "history/history_item_components.h"
 #include "history/history_item.h"
@@ -17,14 +17,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_cursor_state.h"
 #include "history/view/media/history_view_media_common.h"
 #include "ui/image/image.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
+#include "ui/text/format_values.h"
+#include "ui/cached_round_corners.h"
+#include "layout.h" // FullSelection
 #include "data/data_session.h"
 #include "data/data_media_types.h"
 #include "data/data_web_page.h"
 #include "data/data_photo.h"
+#include "data/data_photo_media.h"
 #include "data/data_file_origin.h"
-#include "app.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 namespace HistoryView {
 namespace {
@@ -32,15 +35,17 @@ namespace {
 constexpr auto kMaxOriginalEntryLines = 8192;
 
 int articleThumbWidth(not_null<PhotoData*> thumb, int height) {
-	auto w = thumb->thumbnail()->width();
-	auto h = thumb->thumbnail()->height();
-	return qMax(qMin(height * w / h, height), 1);
+	const auto size = thumb->location(Data::PhotoSize::Thumbnail);
+	return size.height()
+		? qMax(qMin(height * size.width() / size.height(), height), 1)
+		: 1;
 }
 
-int articleThumbHeight(not_null<PhotoData*> thumb, int width) {
-	return qMax(
-		thumb->thumbnail()->height() * width / thumb->thumbnail()->width(),
-		1);
+int articleThumbHeight(not_null<Data::PhotoMedia*> thumb, int width) {
+	const auto size = thumb->size(Data::PhotoSize::Thumbnail);
+	return size.width()
+		? std::max(size.height() * width / size.width(), 1)
+		: 1;
 }
 
 std::vector<std::unique_ptr<Data::Media>> PrepareCollageMedia(
@@ -49,11 +54,11 @@ std::vector<std::unique_ptr<Data::Media>> PrepareCollageMedia(
 	auto result = std::vector<std::unique_ptr<Data::Media>>();
 	result.reserve(data.items.size());
 	for (const auto item : data.items) {
-		if (const auto document = base::get_if<DocumentData*>(&item)) {
+		if (const auto document = std::get_if<DocumentData*>(&item)) {
 			result.push_back(std::make_unique<Data::MediaFile>(
 				parent,
 				*document));
-		} else if (const auto photo = base::get_if<PhotoData*>(&item)) {
+		} else if (const auto photo = std::get_if<PhotoData*>(&item)) {
 			result.push_back(std::make_unique<Data::MediaPhoto>(
 				parent,
 				*photo));
@@ -127,7 +132,8 @@ QSize WebPage::countOptimalSize() {
 			}
 			return true;
 		}();
-		_openl = previewOfHiddenUrl
+		_openl = (previewOfHiddenUrl
+			|| UrlClickHandler::IsSuspicious(_data->url))
 			? std::make_shared<HiddenUrlClickHandler>(_data->url)
 			: std::make_shared<UrlClickHandler>(_data->url, true);
 		if (_data->document
@@ -195,10 +201,18 @@ QSize WebPage::countOptimalSize() {
 				- st::msgPadding.right()
 				- st::webPageLeft);
 		}
+		auto context = Core::MarkedTextContext();
+		using MarkedTextContext = Core::MarkedTextContext;
+		if (_data->siteName == qstr("Twitter")) {
+			context.type = MarkedTextContext::HashtagMentionType::Twitter;
+		} else if (_data->siteName == qstr("Instagram")) {
+			context.type = MarkedTextContext::HashtagMentionType::Instagram;
+		}
 		_description.setMarkedText(
 			st::webPageDescriptionStyle,
 			text,
-			Ui::WebpageTextDescriptionOptions(_data->siteName));
+			Ui::WebpageTextDescriptionOptions(),
+			context);
 	}
 	if (!displayedSiteName().isEmpty()) {
 		_siteNameLines = 1;
@@ -274,7 +288,7 @@ QSize WebPage::countOptimalSize() {
 		}
 	}
 	if (_data->type == WebPageType::Video && _data->duration) {
-		_duration = formatDurationText(_data->duration);
+		_duration = Ui::FormatDurationText(_data->duration);
 		_durationWidth = st::msgDateFont->width(_duration);
 	}
 	maxWidth += st::msgPadding.left() + st::webPageLeft + st::msgPadding.right();
@@ -409,6 +423,29 @@ void WebPage::refreshParentId(not_null<HistoryItem*> realParent) {
 	}
 }
 
+void WebPage::ensurePhotoMediaCreated() const {
+	Expects(_data->photo != nullptr);
+
+	if (_photoMedia) {
+		return;
+	}
+	_photoMedia = _data->photo->createMediaView();
+	const auto contextId = _parent->data()->fullId();
+	_photoMedia->wanted(Data::PhotoSize::Thumbnail, contextId);
+	history()->owner().registerHeavyViewPart(_parent);
+}
+
+bool WebPage::hasHeavyPart() const {
+	return _photoMedia || (_attach ? _attach->hasHeavyPart() : false);
+}
+
+void WebPage::unloadHeavyPart() {
+	if (_attach) {
+		_attach->unloadHeavyPart();
+	}
+	_photoMedia = nullptr;
+}
+
 void WebPage::draw(Painter &p, const QRect &r, TextSelection selection, crl::time ms) const {
 	if (width() < st::msgPadding.left() + st::msgPadding.right() + 1) return;
 	auto paintx = 0, painty = 0, paintw = width(), painth = height();
@@ -439,30 +476,33 @@ void WebPage::draw(Painter &p, const QRect &r, TextSelection selection, crl::tim
 
 	auto lineHeight = unitedLineHeight();
 	if (asArticle()) {
+		ensurePhotoMediaCreated();
+
 		const auto contextId = _parent->data()->fullId();
-		_data->photo->loadThumbnail(contextId);
-		bool full = _data->photo->thumbnail()->loaded();
 		QPixmap pix;
 		auto pw = qMax(_pixw, lineHeight);
 		auto ph = _pixh;
-		auto pixw = _pixw, pixh = articleThumbHeight(_data->photo, _pixw);
-		const auto maxw = style::ConvertScale(_data->photo->thumbnail()->width());
-		const auto maxh = style::ConvertScale(_data->photo->thumbnail()->height());
+		auto pixw = _pixw, pixh = articleThumbHeight(_photoMedia.get(), _pixw);
+		const auto maxsize = _photoMedia->size(Data::PhotoSize::Thumbnail);
+		const auto maxw = style::ConvertScale(maxsize.width());
+		const auto maxh = style::ConvertScale(maxsize.height());
 		if (pixw * ph != pixh * pw) {
 			float64 coef = (pixw * ph > pixh * pw) ? qMin(ph / float64(pixh), maxh / float64(pixh)) : qMin(pw / float64(pixw), maxw / float64(pixw));
 			pixh = qRound(pixh * coef);
 			pixw = qRound(pixw * coef);
 		}
-		if (full) {
-			pix = _data->photo->thumbnail()->pixSingle(contextId, pixw, pixh, pw, ph, ImageRoundRadius::Small);
-		} else if (_data->photo->thumbnailSmall()->loaded()) {
-			pix = _data->photo->thumbnailSmall()->pixBlurredSingle(contextId, pixw, pixh, pw, ph, ImageRoundRadius::Small);
-		} else if (const auto blurred = _data->photo->thumbnailInline()) {
-			pix = blurred->pixBlurredSingle(contextId, pixw, pixh, pw, ph, ImageRoundRadius::Small);
+		if (const auto thumbnail = _photoMedia->image(
+				Data::PhotoSize::Thumbnail)) {
+			pix = thumbnail->pixSingle(pixw, pixh, pw, ph, ImageRoundRadius::Small);
+		} else if (const auto small = _photoMedia->image(
+				Data::PhotoSize::Small)) {
+			pix = small->pixBlurredSingle(pixw, pixh, pw, ph, ImageRoundRadius::Small);
+		} else if (const auto blurred = _photoMedia->thumbnailInline()) {
+			pix = blurred->pixBlurredSingle(pixw, pixh, pw, ph, ImageRoundRadius::Small);
 		}
 		p.drawPixmapLeft(padding.left() + paintw - pw, tshift, width(), pix);
 		if (selected) {
-			App::roundRect(p, style::rtlrect(padding.left() + paintw - pw, tshift, pw, _pixh, width()), p.textPalette().selectOverlay, SelectedOverlaySmallCorners);
+			Ui::FillRoundRect(p, style::rtlrect(padding.left() + paintw - pw, tshift, pw, _pixh, width()), p.textPalette().selectOverlay, Ui::SelectedOverlaySmallCorners);
 		}
 		paintw -= pw + st::webPagePhotoDelta;
 	}
@@ -530,7 +570,7 @@ void WebPage::draw(Painter &p, const QRect &r, TextSelection selection, crl::tim
 				auto dateW = pixwidth - dateX - st::msgDateImgDelta;
 				auto dateH = pixheight - dateY - st::msgDateImgDelta;
 
-				App::roundRect(p, dateX, dateY, dateW, dateH, selected ? st::msgDateImgBgSelected : st::msgDateImgBg, selected ? DateSelectedCorners : DateCorners);
+				Ui::FillRoundRect(p, dateX, dateY, dateW, dateH, selected ? st::msgDateImgBgSelected : st::msgDateImgBg, selected ? Ui::DateSelectedCorners : Ui::DateCorners);
 
 				p.setFont(st::msgDateFont);
 				p.setPen(st::msgDateImgFg);
@@ -678,12 +718,12 @@ TextSelection WebPage::adjustSelection(TextSelection selection, TextSelectType t
 		return _siteName.adjustSelection(selection, type);
 	}
 
+	auto titlesLength = _siteName.length() + _title.length();
 	auto titleSelection = _title.adjustSelection(toTitleSelection(selection), type);
-	if ((!_siteNameLines && !_descriptionLines) || (selection.from >= _siteName.length() && selection.to <= _description.length())) {
+	if ((!_siteNameLines && !_descriptionLines) || (selection.from >= _siteName.length() && selection.to <= titlesLength)) {
 		return fromTitleSelection(titleSelection);
 	}
 
-	auto titlesLength = _siteName.length() + _title.length();
 	auto descriptionSelection = _description.adjustSelection(toDescriptionSelection(selection), type);
 	if ((!_siteNameLines && !_titleLines) || selection.from >= titlesLength) {
 		return fromDescriptionSelection(descriptionSelection);
@@ -789,6 +829,10 @@ QString WebPage::displayedSiteName() const {
 
 WebPage::~WebPage() {
 	history()->owner().unregisterWebPageView(_data, _parent);
+	if (_photoMedia) {
+		history()->owner().keepAlive(base::take(_photoMedia));
+		_parent->checkHeavyPart();
+	}
 }
 
 } // namespace HistoryView

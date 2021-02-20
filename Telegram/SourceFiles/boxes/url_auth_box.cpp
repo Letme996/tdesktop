@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_session.h"
 #include "apiwrap.h"
 #include "app.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 
 void UrlAuthBox::Activate(
@@ -27,7 +28,11 @@ void UrlAuthBox::Activate(
 		int row,
 		int column) {
 	const auto itemId = message->fullId();
-	const auto button = HistoryMessageMarkupButton::Get(itemId, row, column);
+	const auto button = HistoryMessageMarkupButton::Get(
+		&message->history()->owner(),
+		itemId,
+		row,
+		column);
 	if (button->requestId || !IsServerMsgId(itemId.msg)) {
 		return;
 	}
@@ -42,10 +47,13 @@ void UrlAuthBox::Activate(
 		MTP_int(buttonId)
 	)).done([=](const MTPUrlAuthResult &result) {
 		const auto button = HistoryMessageMarkupButton::Get(
+			&session->data(),
 			itemId,
 			row,
 			column);
-		if (!button) return;
+		if (!button) {
+			return;
+		}
 
 		button->requestId = 0;
 		result.match([&](const MTPDurlAuthResultAccepted &data) {
@@ -57,6 +65,7 @@ void UrlAuthBox::Activate(
 		});
 	}).fail([=](const RPCError &error) {
 		const auto button = HistoryMessageMarkupButton::Get(
+			&session->data(),
 			itemId,
 			row,
 			column);
@@ -73,7 +82,11 @@ void UrlAuthBox::Request(
 		int row,
 		int column) {
 	const auto itemId = message->fullId();
-	const auto button = HistoryMessageMarkupButton::Get(itemId, row, column);
+	const auto button = HistoryMessageMarkupButton::Get(
+		&message->history()->owner(),
+		itemId,
+		row,
+		column);
 	if (button->requestId || !IsServerMsgId(itemId.msg)) {
 		return;
 	}
@@ -85,7 +98,7 @@ void UrlAuthBox::Request(
 	const auto bot = request.is_request_write_access()
 		? session->data().processUser(request.vbot()).get()
 		: nullptr;
-	const auto box = std::make_shared<QPointer<BoxContent>>();
+	const auto box = std::make_shared<QPointer<Ui::BoxContent>>();
 	const auto finishWithUrl = [=](const QString &url) {
 		if (*box) {
 			(*box)->closeBox();
@@ -122,7 +135,7 @@ void UrlAuthBox::Request(
 	};
 	*box = Ui::show(
 		Box<UrlAuthBox>(session, url, qs(request.vdomain()), bot, callback),
-		LayerOption::KeepOther);
+		Ui::LayerOption::KeepOther);
 }
 
 UrlAuthBox::UrlAuthBox(

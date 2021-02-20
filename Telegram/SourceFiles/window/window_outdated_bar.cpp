@@ -11,7 +11,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/buttons.h" // Ui::IconButton
 #include "ui/wrap/slide_wrap.h" // Ui::SlideWrap
 #include "ui/text/text_utilities.h" // Ui::Text::ToUpper
-#include "platform/platform_info.h"
+#include "base/platform/base_platform_info.h"
 #include "lang/lang_keys.h"
 #include "styles/style_window.h"
 
@@ -42,11 +42,18 @@ private:
 
 };
 
+[[nodiscard]] rpl::producer<QString> OutdatedReasonPhrase() {
+	const auto why = Platform::WhySystemBecomesOutdated();
+	return (why == Platform::OutdateReason::Is32Bit)
+		? tr::lng_outdated_title_bits()
+		: tr::lng_outdated_title();
+}
+
 Bar::Bar(not_null<QWidget*> parent, QDate date)
 : _date(date)
 , _title(
 	this,
-	tr::lng_outdated_title() | Ui::Text::ToUpper(),
+	OutdatedReasonPhrase() | Ui::Text::ToUpper(),
 	st::windowOutdatedTitle)
 , _details(this,
 	QString(),
@@ -61,9 +68,7 @@ Bar::Bar(not_null<QWidget*> parent, QDate date)
 }
 
 rpl::producer<> Bar::hideClicks() const {
-	return _close->clicks() | rpl::map([] {
-		return rpl::empty_value();
-	});
+	return _close->clicks() | rpl::to_empty;
 }
 
 int Bar::resizeGetHeight(int newWidth) {
@@ -144,6 +149,7 @@ void Closed() {
 } // namespace
 
 object_ptr<Ui::RpWidget> CreateOutdatedBar(not_null<QWidget*> parent) {
+#ifdef DESKTOP_APP_SPECIAL_TARGET
 	const auto date = Platform::WhenSystemBecomesOutdated();
 	if (date.isNull()) {
 		return { nullptr };
@@ -162,7 +168,10 @@ object_ptr<Ui::RpWidget> CreateOutdatedBar(not_null<QWidget*> parent) {
 		Closed();
 	}, wrap->lifetime());
 
-	return std::move(result);
+	return result;
+#else // DESKTOP_APP_SPECIAL_TARGET
+	return { nullptr };
+#endif // DESKTOP_APP_SPECIAL_TARGET
 }
 
 } // namespace Window

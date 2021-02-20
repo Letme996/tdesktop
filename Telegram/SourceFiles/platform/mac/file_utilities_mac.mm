@@ -7,12 +7,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/mac/file_utilities_mac.h"
 
-#include "platform/mac/mac_utilities.h"
+#include "base/platform/mac/base_utilities_mac.h"
 #include "lang/lang_keys.h"
+#include "base/qt_adapters.h"
 #include "styles/style_window.h"
 
 #include <QtWidgets/QApplication>
-#include <QtWidgets/QDesktopWidget>
+#include <QtGui/QScreen>
 
 #include <Cocoa/Cocoa.h>
 #include <CoreFoundation/CFURL.h>
@@ -398,7 +399,11 @@ bool UnsafeShowOpenWithDropdown(const QString &filepath, QPoint menuPosition) {
 	NSString *file = Q2NSString(filepath);
 	@try {
 		OpenFileWithInterface *menu = [[[OpenFileWithInterface alloc] init:file] autorelease];
-		auto r = QApplication::desktop()->screenGeometry(menuPosition);
+		const auto screen = base::QScreenNearestTo(menuPosition);
+		if (!screen) {
+			return false;
+		}
+		const auto r = screen->geometry();
 		auto x = menuPosition.x();
 		auto y = r.y() + r.height() - menuPosition.y();
 		return !![menu popupAtX:x andY:y];
@@ -568,16 +573,6 @@ void UnsafeLaunch(const QString &filepath) {
 	if ([[NSWorkspace sharedWorkspace] openFile:file] == NO) {
 		UnsafeShowOpenWith(filepath);
 	}
-
-	}
-}
-
-void UnsafeShowInFolder(const QString &filepath) {
-	auto folder = QFileInfo(filepath).absolutePath();
-
-	@autoreleasepool {
-
-	[[NSWorkspace sharedWorkspace] selectFile:Q2NSString(filepath) inFileViewerRootedAtPath:Q2NSString(folder)];
 
 	}
 }

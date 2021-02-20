@@ -8,11 +8,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "history/view/media/history_view_file.h"
-#include "media/clip/media_clip_reader.h"
+#include "media/streaming/media_streaming_common.h"
 
+class Image;
 struct HistoryMessageVia;
 struct HistoryMessageReply;
 struct HistoryMessageForwarded;
+class Painter;
+
+namespace Data {
+class DocumentMedia;
+} // namespace Data
 
 namespace Media {
 namespace View {
@@ -22,17 +28,22 @@ class PlaybackProgress;
 
 namespace Media {
 namespace Streaming {
-class Player;
+class Instance;
+struct Update;
+struct Information;
+enum class Error;
 } // namespace Streaming
 } // namespace Media
 
 namespace HistoryView {
 
-class Gif : public File {
+class Gif final : public File {
 public:
 	Gif(
 		not_null<Element*> parent,
+		not_null<HistoryItem*> realParent,
 		not_null<DocumentData*> document);
+	~Gif();
 
 	void draw(Painter &p, const QRect &r, TextSelection selection, crl::time ms) const override;
 	TextState textState(QPoint point, StateRequest request) const override;
@@ -57,7 +68,28 @@ public:
 		return _data;
 	}
 
+	bool fullFeaturedGrouped(RectParts sides) const;
+	QSize sizeForGroupingOptimal(int maxWidth) const override;
+	QSize sizeForGrouping(int width) const override;
+	void drawGrouped(
+		Painter &p,
+		const QRect &clip,
+		TextSelection selection,
+		crl::time ms,
+		const QRect &geometry,
+		RectParts sides,
+		RectParts corners,
+		float64 highlightOpacity,
+		not_null<uint64*> cacheKey,
+		not_null<QPixmap*> cache) const override;
+	TextState getStateGrouped(
+		const QRect &geometry,
+		RectParts sides,
+		QPoint point,
+		StateRequest request) const override;
+
 	void stopAnimation() override;
+	void checkAnimation() override;
 
 	TextWithEntities getCaption() const override {
 		return _caption.toTextWithEntities();
@@ -69,52 +101,87 @@ public:
 	QString additionalInfoString() const override;
 
 	bool skipBubbleTail() const override {
-		return isBubbleBottom() && _caption.isEmpty();
+		return isRoundedInBubbleBottom() && _caption.isEmpty();
 	}
 	bool isReadyForOpen() const override;
 
 	void parentTextUpdated() override;
 
-	~Gif();
+	bool hasHeavyPart() const override;
+	void unloadHeavyPart() override;
 
-protected:
+	void refreshParentId(not_null<HistoryItem*> realParent) override;
+
+	[[nodiscard]] static bool CanPlayInline(not_null<DocumentData*> document);
+
+private:
+	struct Streamed;
+
+	void validateVideoThumbnail() const;
+
 	float64 dataProgress() const override;
 	bool dataFinished() const override;
 	bool dataLoaded() const override;
 
-	void setClipReader(::Media::Clip::ReaderPointer gif);
-	void clearClipReader() {
-		setClipReader(::Media::Clip::ReaderPointer());
-	}
+	void ensureDataMediaCreated() const;
+	void dataMediaCreated() const;
+	void refreshCaption();
 
-private:
 	[[nodiscard]] bool autoplayEnabled() const;
+
 	void playAnimation(bool autoplay) override;
 	QSize countOptimalSize() override;
 	QSize countCurrentSize(int newWidth) override;
 	QSize videoSize() const;
-	::Media::Streaming::Player *activeRoundPlayer() const;
-	::Media::Clip::Reader *currentReader() const;
+	::Media::Streaming::Instance *activeRoundStreamed() const;
+	Streamed *activeOwnStreamed() const;
+	::Media::Streaming::Instance *activeCurrentStreamed() const;
 	::Media::View::PlaybackProgress *videoPlayback() const;
-	void clipCallback(::Media::Clip::Notification notification);
 
-	bool needInfoDisplay() const;
-	int additionalWidth(
+	void createStreamedPlayer();
+	void checkStreamedIsStarted() const;
+	void startStreamedPlayer() const;
+	void setStreamed(std::unique_ptr<Streamed> value);
+	void handleStreamingUpdate(::Media::Streaming::Update &&update);
+	void handleStreamingError(::Media::Streaming::Error &&error);
+	void streamingReady(::Media::Streaming::Information &&info);
+	void repaintStreamedContent();
+
+	[[nodiscard]] bool needInfoDisplay() const;
+	[[nodiscard]] bool needCornerStatusDisplay() const;
+	[[nodiscard]] int additionalWidth(
 		const HistoryMessageVia *via,
 		const HistoryMessageReply *reply,
 		const HistoryMessageForwarded *forwarded) const;
-	int additionalWidth() const;
-	QString mediaTypeString() const;
-	bool isSeparateRoundVideo() const;
+	[[nodiscard]] int additionalWidth() const;
+	[[nodiscard]] QString mediaTypeString() const;
+	[[nodiscard]] bool isSeparateRoundVideo() const;
 
-	not_null<DocumentData*> _data;
+	void validateGroupedCache(
+		const QRect &geometry,
+		RectParts corners,
+		not_null<uint64*> cacheKey,
+		not_null<QPixmap*> cache) const;
+	void setStatusSize(int newSize) const;
+	void updateStatusText() const;
+	[[nodiscard]] QSize sizeForAspectRatio() const;
+
+	[[nodiscard]] bool downloadInCorner() const;
+	void drawCornerStatus(Painter &p, bool selected, QPoint position) const;
+	[[nodiscard]] TextState cornerStatusTextState(
+		QPoint point,
+		StateRequest request,
+		QPoint position) const;
+
+	const not_null<DocumentData*> _data;
 	int _thumbw = 1;
 	int _thumbh = 1;
 	Ui::Text::String _caption;
-	::Media::Clip::ReaderPointer _gif;
+	std::unique_ptr<Streamed> _streamed;
+	mutable std::shared_ptr<Data::DocumentMedia> _dataMedia;
+	mutable std::unique_ptr<Image> _videoThumbnailFrame;
 
-	void setStatusSize(int newSize) const;
-	void updateStatusText() const;
+	QString _downloadSize;
 
 };
 

@@ -8,7 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "passport/passport_encryption.h"
 
 #include "base/openssl_help.h"
-#include "mtproto/rsa_public_key.h"
+#include "mtproto/details/mtproto_rsa_public_key.h"
 
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonArray>
@@ -334,7 +334,7 @@ EncryptedData EncryptData(
 	constexpr auto kFromPadding = kMinPadding + kAlignTo - 1;
 	constexpr auto kPaddingDelta = kMaxPadding - kFromPadding;
 	const auto randomPadding = kFromPadding
-		+ (rand_value<uint32>() % kPaddingDelta);
+		+ (openssl::RandomValue<uint32>() % kPaddingDelta);
 	const auto padding = randomPadding
 		- ((bytes.size() + randomPadding) % kAlignTo);
 	Assert(padding >= kMinPadding && padding <= kMaxPadding);
@@ -429,7 +429,7 @@ uint64 CountSecureSecretId(bytes::const_span secret) {
 bytes::vector EncryptCredentialsSecret(
 		bytes::const_span secret,
 		bytes::const_span publicKey) {
-	const auto key = MTP::internal::RSAPublicKey(publicKey);
+	const auto key = MTP::details::RSAPublicKey(publicKey);
 	return key.encryptOAEPpadding(secret);
 }
 

@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_types.h"
 #include "data/data_flags.h"
 #include "data/data_notify_settings.h"
+#include "data/data_cloud_file.h"
 
 class PeerData;
 class UserData;
@@ -28,6 +29,7 @@ class Session;
 namespace Data {
 
 class Session;
+class GroupCall;
 
 int PeerColorIndex(PeerId peerId);
 int PeerColorIndex(int32 bareId);
@@ -42,6 +44,8 @@ using ChatAdminRights = MTPDchatAdminRights::Flags;
 using ChatRestrictions = MTPDchatBannedRights::Flags;
 
 namespace Data {
+
+class CloudImageView;
 
 class RestrictionCheckResult {
 public:
@@ -82,6 +86,18 @@ private:
 
 	int _value = 0;
 
+};
+
+struct UnavailableReason {
+	QString reason;
+	QString text;
+
+	bool operator==(const UnavailableReason &other) const {
+		return (reason == other.reason) && (text == other.text);
+	}
+	bool operator!=(const UnavailableReason &other) const {
+		return !(*this == other);
+	}
 };
 
 } // namespace Data
@@ -142,7 +158,13 @@ public:
 	}
 	[[nodiscard]] bool isVerified() const;
 	[[nodiscard]] bool isScam() const;
+	[[nodiscard]] bool isFake() const;
 	[[nodiscard]] bool isMegagroup() const;
+	[[nodiscard]] bool isBroadcast() const;
+	[[nodiscard]] bool isRepliesChat() const;
+	[[nodiscard]] bool sharedMediaInfo() const {
+		return isSelf() || isRepliesChat();
+	}
 
 	[[nodiscard]] bool isNotificationsUser() const {
 		return (id == peerFromUser(333000))
@@ -176,9 +198,13 @@ public:
 	[[nodiscard]] bool canWrite() const;
 	[[nodiscard]] Data::RestrictionCheckResult amRestricted(
 		ChatRestriction right) const;
+	[[nodiscard]] bool amAnonymous() const;
 	[[nodiscard]] bool canRevokeFullHistory() const;
 	[[nodiscard]] bool slowmodeApplied() const;
+	[[nodiscard]] rpl::producer<bool> slowmodeAppliedValue() const;
 	[[nodiscard]] int slowmodeSecondsLeft() const;
+	[[nodiscard]] bool canSendPolls() const;
+	[[nodiscard]] bool canManageGroupCall() const;
 
 	[[nodiscard]] UserData *asUser();
 	[[nodiscard]] const UserData *asUser() const;
@@ -188,6 +214,8 @@ public:
 	[[nodiscard]] const ChannelData *asChannel() const;
 	[[nodiscard]] ChannelData *asMegagroup();
 	[[nodiscard]] const ChannelData *asMegagroup() const;
+	[[nodiscard]] ChannelData *asBroadcast();
+	[[nodiscard]] const ChannelData *asBroadcast() const;
 	[[nodiscard]] ChatData *asChatNotMigrated();
 	[[nodiscard]] const ChatData *asChatNotMigrated() const;
 	[[nodiscard]] ChannelData *asChannelOrMigrated();
@@ -221,44 +249,59 @@ public:
 		return _nameFirstLetters;
 	}
 
-	void setUserpic(
-		PhotoId photoId,
-		const StorageImageLocation &location,
-		ImagePtr userpic);
+	void setUserpic(PhotoId photoId, const ImageLocation &location);
 	void setUserpicPhoto(const MTPPhoto &data);
 	void paintUserpic(
 		Painter &p,
+		std::shared_ptr<Data::CloudImageView> &view,
 		int x,
 		int y,
 		int size) const;
 	void paintUserpicLeft(
 			Painter &p,
+			std::shared_ptr<Data::CloudImageView> &view,
 			int x,
 			int y,
 			int w,
 			int size) const {
-		paintUserpic(p, rtl() ? (w - x - size) : x, y, size);
+		paintUserpic(p, view, rtl() ? (w - x - size) : x, y, size);
 	}
 	void paintUserpicRounded(
 		Painter &p,
+		std::shared_ptr<Data::CloudImageView> &view,
 		int x,
 		int y,
 		int size) const;
 	void paintUserpicSquare(
 		Painter &p,
+		std::shared_ptr<Data::CloudImageView> &view,
 		int x,
 		int y,
 		int size) const;
 	void loadUserpic();
-	[[nodiscard]] bool userpicLoaded() const;
-	[[nodiscard]] bool useEmptyUserpic() const;
-	[[nodiscard]] InMemoryKey userpicUniqueKey() const;
-	void saveUserpic(const QString &path, int size) const;
-	void saveUserpicRounded(const QString &path, int size) const;
-	[[nodiscard]] QPixmap genUserpic(int size) const;
-	[[nodiscard]] QPixmap genUserpicRounded(int size) const;
-	[[nodiscard]] StorageImageLocation userpicLocation() const {
-		return _userpicLocation;
+	[[nodiscard]] bool hasUserpic() const;
+	[[nodiscard]] std::shared_ptr<Data::CloudImageView> activeUserpicView();
+	[[nodiscard]] std::shared_ptr<Data::CloudImageView> createUserpicView();
+	[[nodiscard]] bool useEmptyUserpic(
+		std::shared_ptr<Data::CloudImageView> &view) const;
+	[[nodiscard]] InMemoryKey userpicUniqueKey(
+		std::shared_ptr<Data::CloudImageView> &view) const;
+	void saveUserpic(
+		std::shared_ptr<Data::CloudImageView> &view,
+		const QString &path,
+		int size) const;
+	void saveUserpicRounded(
+		std::shared_ptr<Data::CloudImageView> &view,
+		const QString &path,
+		int size) const;
+	[[nodiscard]] QPixmap genUserpic(
+		std::shared_ptr<Data::CloudImageView> &view,
+		int size) const;
+	[[nodiscard]] QPixmap genUserpicRounded(
+		std::shared_ptr<Data::CloudImageView> &view,
+		int size) const;
+	[[nodiscard]] ImageLocation userpicLocation() const {
+		return _userpic.location();
 	}
 	[[nodiscard]] bool userpicPhotoUnknown() const {
 		return (_userpicPhotoId == kUnknownPhotoId);
@@ -271,9 +314,7 @@ public:
 
 	// If this string is not empty we must not allow to open the
 	// conversation and we must show this string instead.
-	[[nodiscard]] virtual QString unavailableReason() const {
-		return QString();
-	}
+	[[nodiscard]] QString computeUnavailableReason() const;
 
 	[[nodiscard]] ClickHandlerPtr createOpenLink();
 	[[nodiscard]] const ClickHandlerPtr &openLink() {
@@ -283,16 +324,14 @@ public:
 		return _openLink;
 	}
 
-	[[nodiscard]] ImagePtr currentUserpic() const;
+	[[nodiscard]] Image *currentUserpic(
+		std::shared_ptr<Data::CloudImageView> &view) const;
 
 	[[nodiscard]] bool canPinMessages() const;
-	[[nodiscard]] MsgId pinnedMessageId() const {
-		return _pinnedMessageId;
-	}
-	void setPinnedMessageId(MsgId messageId);
-	void clearPinnedMessage() {
-		setPinnedMessageId(0);
-	}
+	[[nodiscard]] bool canEditMessagesIndefinitely() const;
+
+	[[nodiscard]] bool hasPinnedMessages() const;
+	void setHasPinnedMessages(bool has);
 
 	[[nodiscard]] bool canExportChatHistory() const;
 
@@ -318,16 +357,40 @@ public:
 			: (_settings.value() | rpl::type_erased());
 	}
 
-	enum LoadedStatus {
-		NotLoaded = 0x00,
-		MinimalLoaded = 0x01,
-		FullLoaded = 0x02,
+	enum class BlockStatus : char {
+		Unknown,
+		Blocked,
+		NotBlocked,
 	};
+	[[nodiscard]] BlockStatus blockStatus() const {
+		return _blockStatus;
+	}
+	[[nodiscard]] bool isBlocked() const {
+		return (blockStatus() == BlockStatus::Blocked);
+	}
+	void setIsBlocked(bool is);
+
+	enum class LoadedStatus : char {
+		Not,
+		Minimal,
+		Full,
+	};
+	[[nodiscard]] LoadedStatus loadedStatus() const {
+		return _loadedStatus;
+	}
+	[[nodiscard]] bool isMinimalLoaded() const {
+		return (loadedStatus() != LoadedStatus::Not);
+	}
+	[[nodiscard]] bool isFullLoaded() const {
+		return (loadedStatus() == LoadedStatus::Full);
+	}
+	void setLoadedStatus(LoadedStatus status);
+
+	[[nodiscard]] Data::GroupCall *groupCall() const;
 
 	const PeerId id;
 	QString name;
-	LoadedStatus loadedStatus = NotLoaded;
-	MTPinputPeer input;
+	MTPinputPeer input = MTP_inputPeerEmpty();
 
 	int nameVersion = 1;
 
@@ -339,27 +402,24 @@ protected:
 	void updateUserpic(
 		PhotoId photoId,
 		MTP::DcId dcId,
-		const MTPFileLocation &location);
+		const MTPFileLocation &small);
 	void clearUserpic();
 
 private:
 	void fillNames();
-	std::unique_ptr<Ui::EmptyUserpic> createEmptyUserpic() const;
-	void refreshEmptyUserpic() const;
+	[[nodiscard]] not_null<Ui::EmptyUserpic*> ensureEmptyUserpic() const;
+	[[nodiscard]] virtual auto unavailableReasons() const
+		-> const std::vector<Data::UnavailableReason> &;
 
-	void setUserpicChecked(
-		PhotoId photoId,
-		const StorageImageLocation &location,
-		ImagePtr userpic);
+	void setUserpicChecked(PhotoId photoId, const ImageLocation &location);
 
 	static constexpr auto kUnknownPhotoId = PhotoId(0xFFFFFFFFFFFFFFFFULL);
 
-	not_null<Data::Session*> _owner;
+	const not_null<Data::Session*> _owner;
 
-	ImagePtr _userpic;
+	mutable Data::CloudImage _userpic;
 	PhotoId _userpicPhotoId = kUnknownPhotoId;
 	mutable std::unique_ptr<Ui::EmptyUserpic> _userpicEmpty;
-	StorageImageLocation _userpicLocation;
 	Ui::Text::String _nameText;
 
 	Data::NotifySettings _notify;
@@ -369,9 +429,11 @@ private:
 	base::flat_set<QChar> _nameFirstLetters;
 
 	crl::time _lastFullUpdate = 0;
-	MsgId _pinnedMessageId = 0;
+	bool _hasPinnedMessages = false;
 
 	Settings _settings = { kSettingsUnknown };
+	BlockStatus _blockStatus = BlockStatus::Unknown;
+	LoadedStatus _loadedStatus = LoadedStatus::Not;
 
 	QString _about;
 
@@ -384,5 +446,16 @@ std::vector<ChatRestrictions> ListOfRestrictions();
 std::optional<QString> RestrictionError(
 	not_null<PeerData*> peer,
 	ChatRestriction restriction);
+
+void SetTopPinnedMessageId(not_null<PeerData*> peer, MsgId messageId);
+[[nodiscard]] FullMsgId ResolveTopPinnedId(
+	not_null<PeerData*> peer,
+	PeerData *migrated);
+[[nodiscard]] FullMsgId ResolveMinPinnedId(
+	not_null<PeerData*> peer,
+	PeerData *migrated);
+[[nodiscard]] std::optional<int> ResolvePinnedCount(
+	not_null<PeerData*> peer,
+	PeerData *migrated);
 
 } // namespace Data

@@ -8,7 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "media/view/media_view_playback_progress.h"
 
 #include "media/audio/media_audio.h"
-#include "styles/style_mediaview.h"
+#include "styles/style_media_view.h"
 
 namespace Media {
 namespace View {
@@ -58,15 +58,20 @@ void PlaybackProgress::updateState(
 	const auto progress = (position > length)
 		? 1.
 		: length
-		? snap(float64(position) / length, 0., 1.)
+		? std::clamp(float64(position) / length, 0., 1.)
 		: 0.;
 	const auto availableTillProgress = (availableTill > position)
-		? snap(float64(availableTill) / length, 0., 1.)
+		? std::clamp(float64(availableTill) / length, 0., 1.)
 		: -1.;
 	const auto animatedPosition = position + (state.frequency * kPlaybackAnimationDurationMs / 1000);
 	const auto animatedProgress = length ? qMax(float64(animatedPosition) / length, 0.) : 0.;
 	if (length != _length || position != _position || wasInLoadingState) {
-		if (auto animated = (length && _length && animatedProgress > value())) {
+		const auto animated = length
+			&& _length
+			&& (animatedProgress > value())
+			&& (position > _position)
+			&& (position < _position + state.frequency);
+		if (animated) {
 			setValue(animatedProgress, animated);
 		} else {
 			setValue(progress, animated);

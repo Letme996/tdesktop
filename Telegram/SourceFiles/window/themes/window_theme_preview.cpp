@@ -10,13 +10,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/themes/window_theme.h"
 #include "lang/lang_keys.h"
 #include "platform/platform_window_title.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
 #include "ui/image/image_prepare.h"
 #include "ui/emoji_config.h"
 #include "styles/style_widgets.h"
 #include "styles/style_window.h"
-#include "styles/style_mediaview.h"
-#include "styles/style_history.h"
+#include "styles/style_media_view.h"
+#include "styles/style_chat.h"
 #include "styles/style_dialogs.h"
 #include "styles/style_info.h"
 
@@ -41,7 +41,7 @@ QString fillLetters(const QString &name) {
 			}
 		} else if (!letterFound && ch->isLetterOrNumber()) {
 			letterFound = true;
-			if (ch + 1 != end && chIsDiac(*(ch + 1))) {
+			if (ch + 1 != end && Ui::Text::IsDiac(*(ch + 1))) {
 				letters.push_back(QString(ch, 2));
 				levels.push_back(level);
 				++ch;
@@ -245,12 +245,13 @@ void Generator::addAudioBubble(QVector<int> waveform, int waveactive, QString wa
 
 	auto width = st::msgFileMinWidth;
 	auto tleft = 0, tright = 0;
-	tleft = st::msgFilePadding.left() + st::msgFileSize + st::msgFilePadding.right();
-	tright = st::msgFileThumbPadding.left();
+	const auto &st = st::msgFileLayout;
+	tleft = st.padding.left() + st.thumbSize + st.padding.right();
+	tright = st.padding.left();
 	accumulate_max(width, tleft + st::normalFont->width(wavestatus) + skipBlock.width() + st::msgPadding.right());
 	accumulate_min(width, st::msgMaxWidth);
 
-	auto height = st::msgFilePadding.top() + st::msgFileSize + st::msgFilePadding.bottom();
+	auto height = st.padding.top() + st.thumbSize + st.padding.bottom();
 	addBubble(std::move(bubble), width, height, date, status);
 }
 
@@ -472,10 +473,10 @@ void Generator::paintTopBar() {
 
 	auto right = st::topBarMenuToggle.width;
 	st::topBarMenuToggle.icon[_palette].paint(*_p, _topBar.x() + _topBar.width() - right + st::topBarMenuToggle.iconPosition.x(), _topBar.y() + st::topBarMenuToggle.iconPosition.y(), _rect.width());
+	right += st::topBarSkip + st::topBarCall.width;
+	st::topBarCall.icon[_palette].paint(*_p, _topBar.x() + _topBar.width() - right + st::topBarCall.iconPosition.x(), _topBar.y() + st::topBarCall.iconPosition.y(), _rect.width());
 	right += st::topBarSearch.width;
 	st::topBarSearch.icon[_palette].paint(*_p, _topBar.x() + _topBar.width() - right + st::topBarSearch.iconPosition.x(), _topBar.y() + st::topBarSearch.iconPosition.y(), _rect.width());
-	right += st::topBarCallSkip + st::topBarCall.width;
-	st::topBarCall.icon[_palette].paint(*_p, _topBar.x() + _topBar.width() - right + st::topBarCall.iconPosition.x(), _topBar.y() + st::topBarCall.iconPosition.y(), _rect.width());
 
 	auto decreaseWidth = st::topBarCall.width + st::topBarCallSkip + st::topBarSearch.width + st::topBarMenuToggle.width;
 	auto nameleft = _topBar.x() + st::topBarArrowPadding.right();
@@ -560,7 +561,7 @@ void Generator::paintDialogs() {
 	_p->setBrush(st::dialogsFilter.bgColor[_palette]);
 	{
 		PainterHighQualityEnabler hq(*_p);
-		_p->drawRoundedRect(QRectF(filter).marginsRemoved(QMarginsF(st::dialogsFilter.borderWidth / 2., st::dialogsFilter.borderWidth / 2., st::dialogsFilter.borderWidth / 2., st::dialogsFilter.borderWidth / 2.)), st::buttonRadius - (st::dialogsFilter.borderWidth / 2.), st::buttonRadius - (st::dialogsFilter.borderWidth / 2.));
+		_p->drawRoundedRect(QRectF(filter).marginsRemoved(QMarginsF(st::dialogsFilter.borderWidth / 2., st::dialogsFilter.borderWidth / 2., st::dialogsFilter.borderWidth / 2., st::dialogsFilter.borderWidth / 2.)), st::roundRadiusSmall - (st::dialogsFilter.borderWidth / 2.), st::roundRadiusSmall - (st::dialogsFilter.borderWidth / 2.));
 	}
 
 	if (!st::dialogsFilter.icon.empty()) {
@@ -627,7 +628,6 @@ void Generator::paintRow(const Row &row) {
 	auto availableWidth = namewidth;
 	if (row.unreadCounter) {
 		auto counter = QString::number(row.unreadCounter);
-		auto mutedCounter = row.muted;
 		auto unreadRight = x + fullWidth - st::dialogsPadding.x();
 		auto unreadTop = texttop + st::dialogsTextFont->ascent - st::dialogsUnreadFont->ascent - (st::dialogsUnreadHeight - st::dialogsUnreadFont->height) / 2;
 
@@ -764,13 +764,14 @@ void Generator::paintBubble(const Bubble &bubble) {
 		_p->setFont(st::msgFont);
 		bubble.text.draw(*_p, trect.x(), trect.y(), trect.width());
 	} else if (!bubble.waveform.isEmpty()) {
-		auto nameleft = x + st::msgFilePadding.left() + st::msgFileSize + st::msgFilePadding.right();
-		auto nametop = y + st::msgFileNameTop;
-		auto nameright = st::msgFilePadding.left();
-		auto statustop = y + st::msgFileStatusTop;
-		auto bottom = y + st::msgFilePadding.top() + st::msgFileSize + st::msgFilePadding.bottom();
+		const auto &st = st::msgFileLayout;
+		auto nameleft = x + st.padding.left() + st.thumbSize + st.padding.right();
+		auto nametop = y + st.nameTop;
+		auto nameright = st.padding.left();
+		auto statustop = y + st.statusTop;
+		auto bottom = y + st.padding.top() + st.thumbSize + st.padding.bottom();
 
-		auto inner = style::rtlrect(x + st::msgFilePadding.left(), y + st::msgFilePadding.top(), st::msgFileSize, st::msgFileSize, _rect.width());
+		auto inner = style::rtlrect(x + st.padding.left(), y + st.padding.top(), st.thumbSize, st.thumbSize, _rect.width());
 		_p->setPen(Qt::NoPen);
 		_p->setBrush(bubble.outbg ? st::msgFileOutBg[_palette] : st::msgFileInBg[_palette]);
 
@@ -791,7 +792,7 @@ void Generator::paintBubble(const Bubble &bubble) {
 		auto bar_count = qMin(availw / (st::msgWaveformBar + st::msgWaveformSkip), wf_size);
 		auto max_value = 0;
 		auto max_delta = st::msgWaveformMax - st::msgWaveformMin;
-		auto wave_bottom = y + st::msgFilePadding.top() + st::msgWaveformMax;
+		auto wave_bottom = y + st::msgFileLayout.padding.top() + st::msgWaveformMax;
 		_p->setPen(Qt::NoPen);
 		auto norm_value = uchar(31);
 		for (auto i = 0, bar_x = 0, sum_i = 0; i < wf_size; ++i) {
@@ -992,19 +993,19 @@ QImage GeneratePreview(
 }
 
 int DefaultPreviewTitleHeight() {
-	return st::titleHeight;
+	return st::defaultWindowTitle.height;
 }
 
 void DefaultPreviewWindowTitle(Painter &p, const style::palette &palette, QRect body, int outerWidth) {
-	auto titleRect = QRect(body.x(), body.y() - st::titleHeight, body.width(), st::titleHeight);
+	auto titleRect = QRect(body.x(), body.y() - st::defaultWindowTitle.height, body.width(), st::defaultWindowTitle.height);
 	p.fillRect(titleRect, QColor(0, 0, 0));
 	p.fillRect(titleRect, st::titleBgActive[palette]);
-	auto right = st::titleButtonClose.width;
-	st::titleButtonClose.icon[palette].paint(p, titleRect.x() + titleRect.width() - right + st::titleButtonClose.iconPosition.x(), titleRect.y() + st::titleButtonClose.iconPosition.y(), outerWidth);
-	right += st::titleButtonMaximize.width;
-	st::titleButtonMaximize.icon[palette].paint(p, titleRect.x() + titleRect.width() - right + st::titleButtonMaximize.iconPosition.x(), titleRect.y() + st::titleButtonMaximize.iconPosition.y(), outerWidth);
-	right += st::titleButtonMinimize.width;
-	st::titleButtonMinimize.icon[palette].paint(p, titleRect.x() + titleRect.width() - right + st::titleButtonMinimize.iconPosition.x(), titleRect.y() + st::titleButtonMinimize.iconPosition.y(), outerWidth);
+	auto right = st::windowTitleButtonClose.width;
+	st::windowTitleButtonClose.icon[palette].paint(p, titleRect.x() + titleRect.width() - right + st::windowTitleButtonClose.iconPosition.x(), titleRect.y() + st::windowTitleButtonClose.iconPosition.y(), outerWidth);
+	right += st::defaultWindowTitle.maximize.width;
+	st::defaultWindowTitle.maximize.icon[palette].paint(p, titleRect.x() + titleRect.width() - right + st::defaultWindowTitle.maximize.iconPosition.x(), titleRect.y() + st::defaultWindowTitle.maximize.iconPosition.y(), outerWidth);
+	right += st::defaultWindowTitle.minimize.width;
+	st::defaultWindowTitle.minimize.icon[palette].paint(p, titleRect.x() + titleRect.width() - right + st::defaultWindowTitle.minimize.iconPosition.x(), titleRect.y() + st::defaultWindowTitle.minimize.iconPosition.y(), outerWidth);
 	p.fillRect(titleRect.x(), titleRect.y() + titleRect.height() - st::lineWidth, titleRect.width(), st::lineWidth, st::titleShadow[palette]);
 }
 
@@ -1052,7 +1053,7 @@ void DefaultPreviewWindowFramePaint(QImage &preview, const style::palette &palet
 	Painter p(&preview);
 	DefaultPreviewWindowTitle(p, palette, body, outerWidth);
 
-	auto inner = QRect(body.x(), body.y() - st::titleHeight, body.width(), body.height() + st::titleHeight);
+	auto inner = QRect(body.x(), body.y() - st::defaultWindowTitle.height, body.width(), body.height() + st::defaultWindowTitle.height);
 	p.setClipRegion(QRegion(inner.marginsAdded(QMargins(size, size, size, size))) - inner);
 	p.drawImage(inner.x() - left, inner.y() - top, topLeft);
 	p.drawImage(inner.x() + inner.width() + right - width, inner.y() - top, topRight);

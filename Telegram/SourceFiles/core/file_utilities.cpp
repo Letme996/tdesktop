@@ -7,11 +7,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "core/file_utilities.h"
 
+#include "boxes/abstract_box.h"
 #include "storage/localstorage.h"
+#include "base/platform/base_platform_info.h"
+#include "base/platform/base_platform_file_utilities.h"
 #include "platform/platform_file_utilities.h"
 #include "core/application.h"
 #include "base/unixtime.h"
 #include "ui/delayed_activation.h"
+#include "ui/chat/attach/attach_extensions.h"
+#include "main/main_session.h"
 #include "mainwindow.h"
 
 #include <QtWidgets/QFileDialog>
@@ -118,6 +123,13 @@ QString filedialogNextFilename(
 
 namespace File {
 
+void OpenUrl(const QString &url) {
+	crl::on_main([=] {
+		Ui::PreventDelayedActivation();
+		Platform::File::UnsafeOpenUrl(url);
+	});
+}
+
 void OpenEmailLink(const QString &email) {
 	crl::on_main([=] {
 		Ui::PreventDelayedActivation();
@@ -146,68 +158,31 @@ void Launch(const QString &filepath) {
 void ShowInFolder(const QString &filepath) {
 	crl::on_main([=] {
 		Ui::PreventDelayedActivation();
-		Platform::File::UnsafeShowInFolder(filepath);
+		if (Platform::IsLinux()) {
+			// Hide mediaview to make other apps visible.
+			Ui::hideLayer(anim::type::instant);
+		}
+		base::Platform::ShowInFolder(filepath);
 	});
 }
 
-QString DefaultDownloadPath() {
+QString DefaultDownloadPathFolder(not_null<Main::Session*> session) {
+	return session->supportMode() ? u"Tsupport Desktop"_q : AppName.utf16();
+}
+
+QString DefaultDownloadPath(not_null<Main::Session*> session) {
 	return QStandardPaths::writableLocation(
 		QStandardPaths::DownloadLocation)
 		+ '/'
-		+ (Main::Session::Exists() && Auth().supportMode()
-			? "Tsupport Desktop"
-			: str_const_toString(AppName))
+		+ DefaultDownloadPathFolder(session)
 		+ '/';
 }
 
-QString NameFromUserString(QString name) {
-	static const auto Bad = { '/', '\\', '<', '>', ':', '"', '|', '?', '*' };
-	for (auto &ch : name) {
-		if (ch < 32 || ranges::find(Bad, ch.unicode()) != end(Bad)) {
-			ch = '_';
-		}
-	}
-	if (name.isEmpty() || name.endsWith(' ') || name.endsWith('.')) {
-		name.append('_');
-	}
-#ifdef Q_OS_WIN
-	static const auto BadNames = {
-		qstr("CON"),
-		qstr("PRN"),
-		qstr("AUX"),
-		qstr("NUL"),
-		qstr("COM1"),
-		qstr("COM2"),
-		qstr("COM3"),
-		qstr("COM4"),
-		qstr("COM5"),
-		qstr("COM6"),
-		qstr("COM7"),
-		qstr("COM8"),
-		qstr("COM9"),
-		qstr("LPT1"),
-		qstr("LPT2"),
-		qstr("LPT3"),
-		qstr("LPT4"),
-		qstr("LPT5"),
-		qstr("LPT6"),
-		qstr("LPT7"),
-		qstr("LPT8"),
-		qstr("LPT9")
-	};
-	for (const auto bad : BadNames) {
-		if (name.startsWith(bad, Qt::CaseInsensitive)) {
-			if (name.size() == bad.size() || name[bad.size()] == '.') {
-				name = '_' + name;
-				break;
-			}
-		}
-	}
-#endif // Q_OS_WIN
-	return name;
-}
-
 namespace internal {
+
+void UnsafeOpenUrlDefault(const QString &url) {
+	QDesktopServices::openUrl(url);
+}
 
 void UnsafeOpenEmailLinkDefault(const QString &email) {
 	auto url = QUrl(qstr("mailto:") + email);
@@ -342,6 +317,23 @@ QString AllFilesFilter() {
 #endif // Q_OS_WIN
 }
 
+QString ImagesFilter() {
+	return u"Image files (*"_q + Ui::ImageExtensions().join(u" *"_q) + u")"_q;
+}
+
+QString AllOrImagesFilter() {
+	return AllFilesFilter() + u";;"_q + ImagesFilter();
+}
+
+QString ImagesOrAllFilter() {
+	return ImagesFilter() + u";;"_q + AllFilesFilter();
+}
+
+QString PhotoVideoFilesFilter() {
+	return u"Image and Video Files (*.png *.jpg *.jpeg *.mp4 *.mov);;"_q
+		+ AllFilesFilter();
+}
+
 namespace internal {
 
 void InitLastPathDefault() {
@@ -366,21 +358,24 @@ bool GetDefault(
 	}
 	QString file;
 
+	const auto resolvedParent = (parent && parent->window()->isVisible())
+		? parent->window()
+		: Core::App().getFileDialogParent();
 	Core::App().notifyFileDialogShown(true);
 	if (type == Type::ReadFiles) {
-		files = QFileDialog::getOpenFileNames(Core::App().getFileDialogParent(), caption, startFile, filter);
+		files = QFileDialog::getOpenFileNames(resolvedParent, caption, startFile, filter);
 		QString path = files.isEmpty() ? QString() : QFileInfo(files.back()).absoluteDir().absolutePath();
 		if (!path.isEmpty() && path != cDialogLastPath()) {
 			cSetDialogLastPath(path);
-			Local::writeUserSettings();
+			Local::writeSettings();
 		}
 		return !files.isEmpty();
 	} else if (type == Type::ReadFolder) {
-		file = QFileDialog::getExistingDirectory(Core::App().getFileDialogParent(), caption, startFile);
+		file = QFileDialog::getExistingDirectory(resolvedParent, caption, startFile);
 	} else if (type == Type::WriteFile) {
-		file = QFileDialog::getSaveFileName(Core::App().getFileDialogParent(), caption, startFile, filter);
+		file = QFileDialog::getSaveFileName(resolvedParent, caption, startFile, filter);
 	} else {
-		file = QFileDialog::getOpenFileName(Core::App().getFileDialogParent(), caption, startFile, filter);
+		file = QFileDialog::getOpenFileName(resolvedParent, caption, startFile, filter);
 	}
 	Core::App().notifyFileDialogShown(false);
 
@@ -393,7 +388,7 @@ bool GetDefault(
 		auto path = QFileInfo(file).absoluteDir().absolutePath();
 		if (!path.isEmpty() && path != cDialogLastPath()) {
 			cSetDialogLastPath(path);
-			Local::writeUserSettings();
+			Local::writeSettings();
 		}
 	}
 	files = QStringList(file);

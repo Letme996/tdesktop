@@ -32,17 +32,26 @@ enum class Error;
 
 class Reader final : public base::has_weak_ptr {
 public:
+	enum class FillState : uchar {
+		Success,
+		WaitingCache,
+		WaitingRemote,
+		Failed,
+	};
+
 	// Main thread.
-	Reader(
-		not_null<Storage::Cache::Database*> cache,
-		std::unique_ptr<Loader> loader);
+	explicit Reader(
+		std::unique_ptr<Loader> loader,
+		Storage::Cache::Database *cache = nullptr);
+
+	void setLoaderPriority(int priority);
 
 	// Any thread.
 	[[nodiscard]] int size() const;
 	[[nodiscard]] bool isRemoteLoader() const;
 
 	// Single thread.
-	[[nodiscard]] bool fill(
+	[[nodiscard]] FillState fill(
 		int offset,
 		bytes::span buffer,
 		not_null<crl::semaphore*> notify);
@@ -55,16 +64,19 @@ public:
 	void startSleep(not_null<crl::semaphore*> wake);
 	void wakeFromSleep();
 	void stopSleep();
+	void stopStreamingAsync();
+	void tryRemoveLoaderAsync();
 
 	// Main thread.
 	void startStreaming();
 	void stopStreaming(bool stillActive = false);
 	[[nodiscard]] rpl::producer<LoadedPart> partsForDownloader() const;
 	void loadForDownloader(
-		Storage::StreamedFileDownloader *downloader,
+		not_null<Storage::StreamedFileDownloader*> downloader,
 		int offset);
 	void doneForDownloader(int offset);
-	void cancelForDownloader(Storage::StreamedFileDownloader *downloader);
+	void cancelForDownloader(
+		not_null<Storage::StreamedFileDownloader*> downloader);
 
 	~Reader();
 
@@ -96,9 +108,8 @@ private:
 		StackIntVector<kReadFromCacheMax> sliceNumbersFromCache;
 		StackIntVector<kLoadFromRemoteMax> offsetsFromLoader;
 		SerializedSlice toCache;
-		bool filled = false;
+		FillState state = FillState::WaitingRemote;
 	};
-
 	struct Slice {
 		enum class Flag : uchar {
 			LoadingFromCache = 0x01,
@@ -204,7 +215,7 @@ private:
 
 	bool checkForSomethingMoreReceived();
 
-	bool fillFromSlices(int offset, bytes::span buffer);
+	FillState fillFromSlices(int offset, bytes::span buffer);
 
 	void finalizeCache();
 
@@ -218,16 +229,21 @@ private:
 	void checkForDownloaderChange(int checkItemsCount);
 	void checkForDownloaderReadyOffsets();
 
-	static std::shared_ptr<CacheHelper> InitCacheHelper(
-		std::optional<Storage::Cache::Key> baseKey);
+	void refreshLoaderPriority();
 
-	const not_null<Storage::Cache::Database*> _cache;
+	static std::shared_ptr<CacheHelper> InitCacheHelper(
+		Storage::Cache::Key baseKey);
+
 	const std::unique_ptr<Loader> _loader;
+	Storage::Cache::Database * const _cache = nullptr;
+
+	// shared_ptr is used to be able to have weak_ptr.
 	const std::shared_ptr<CacheHelper> _cacheHelper;
 
 	base::thread_safe_queue<LoadedPart, std::vector> _loadedParts;
 	std::atomic<crl::semaphore*> _waiting = nullptr;
 	std::atomic<crl::semaphore*> _sleeping = nullptr;
+	std::atomic<bool> _stopStreamingAsync = false;
 	PriorityQueue _loadingOffsets;
 
 	Slices _slices;
@@ -241,6 +257,7 @@ private:
 	// Main thread.
 	Storage::StreamedFileDownloader *_attachedDownloader = nullptr;
 	rpl::event_stream<LoadedPart> _partsForDownloader;
+	int _realPriority = 1;
 	bool _streamingActive = false;
 
 	// Streaming thread.

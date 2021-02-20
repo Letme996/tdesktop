@@ -7,30 +7,26 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "boxes/abstract_box.h"
-#include <vector>
+#include "ui/layers/generic_box.h"
+#include "base/required.h"
 
-namespace Ui {
-class Radiobutton;
-} // namespace Ui
+namespace style {
+struct Checkbox;
+struct Radio;
+} // namespace style
 
-class SingleChoiceBox : public BoxContent {
-public:
-	SingleChoiceBox(
-		QWidget*,
-		rpl::producer<QString> title,
-		const std::vector<QString> &optionTexts,
-		int initialSelection,
-		Fn<void(int)> callback);
+struct SingleChoiceBoxArgs {
+	template <typename T>
+	using required = base::required<T>;
 
-protected:
-	void prepare() override;
-
-private:
-	rpl::producer<QString> _title;
-	std::vector<QString> _optionTexts;
-	int _initialSelection = 0;
-	Fn<void(int)> _callback;
-
+	required<rpl::producer<QString>> title;
+	const std::vector<QString> &options;
+	int initialSelection = 0;
+	Fn<void(int)> callback;
+	const style::Checkbox *st = nullptr;
+	const style::Radio *radioSt = nullptr;
 };
 
+void SingleChoiceBox(
+	not_null<Ui::GenericBox*> box,
+	SingleChoiceBoxArgs &&args);

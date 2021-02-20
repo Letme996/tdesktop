@@ -13,9 +13,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/wrap/vertical_layout.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/checkbox.h"
+#include "ui/widgets/buttons.h"
 #include "ui/widgets/continuous_sliders.h"
+#include "ui/widgets/box_content_divider.h"
 #include "ui/toast/toast.h"
-#include "info/profile/info_profile_button.h"
 #include "info/profile/info_profile_icon.h"
 #include "info/profile/info_profile_values.h"
 #include "boxes/peers/edit_participants_box.h"
@@ -23,6 +24,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_session_controller.h"
 #include "mainwindow.h"
 #include "app.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 #include "styles/style_info.h"
 
@@ -133,6 +135,8 @@ std::vector<std::pair<ChatAdminRights, QString>> AdminRightLabels(
 				? tr::lng_rights_group_invite_link(tr::now)
 				: tr::lng_rights_group_invite(tr::now) },
 			{ Flag::f_pin_messages, tr::lng_rights_group_pin(tr::now) },
+			{ Flag::f_manage_call, tr::lng_rights_group_manage_calls(tr::now) },
+			{ Flag::f_anonymous, tr::lng_rights_group_anonymous(tr::now) },
 			{ Flag::f_add_admins, tr::lng_rights_add_admins(tr::now) },
 		};
 	} else {
@@ -295,18 +299,22 @@ ChatRestrictions FixDependentRestrictions(ChatRestrictions restrictions) {
 	return restrictions;
 }
 
-ChatAdminRights FullAdminRights(bool isGroup) {
+ChatAdminRights AdminRightsForOwnershipTransfer(bool isGroup) {
 	auto result = ChatAdminRights();
 	for (const auto &[flag, label] : AdminRightLabels(isGroup, true)) {
-		result |= flag;
+		if (!(flag & ChatAdminRight::f_anonymous)) {
+			result |= flag;
+		}
 	}
 	return result;
 }
 
 EditPeerPermissionsBox::EditPeerPermissionsBox(
 	QWidget*,
+	not_null<Window::SessionNavigation*> navigation,
 	not_null<PeerData*> peer)
-: _peer(peer->migrateToOrMe()) {
+: _navigation(navigation)
+, _peer(peer->migrateToOrMe()) {
 }
 
 auto EditPeerPermissionsBox::saveEvents() const -> rpl::producer<Result> {
@@ -387,7 +395,7 @@ Fn<int()> EditPeerPermissionsBox::addSlowmodeSlider(
 		channel ? channel->slowmodeSeconds() : 0);
 
 	container->add(
-		object_ptr<BoxContentDivider>(container),
+		object_ptr<Ui::BoxContentDivider>(container),
 		{ 0, st::infoProfileSkip, 0, st::infoProfileSkip });
 
 	container->add(
@@ -520,8 +528,6 @@ void EditPeerPermissionsBox::addBannedButtons(
 		}
 	}
 	const auto channel = _peer->asChannel();
-
-	const auto navigation = App::wnd()->sessionController();
 	container->add(EditPeerInfoBox::CreateButton(
 		container,
 		tr::lng_manage_peer_exceptions(),
@@ -530,7 +536,7 @@ void EditPeerPermissionsBox::addBannedButtons(
 			: rpl::single(0)) | ToPositiveNumberString(),
 		[=] {
 			ParticipantsBoxController::Start(
-				navigation,
+				_navigation,
 				_peer,
 				ParticipantsBoxController::Role::Restricted);
 		},
@@ -543,7 +549,7 @@ void EditPeerPermissionsBox::addBannedButtons(
 			| ToPositiveNumberString(),
 			[=] {
 				ParticipantsBoxController::Start(
-					navigation,
+					_navigation,
 					_peer,
 					ParticipantsBoxController::Role::Kicked);
 			},

@@ -7,33 +7,38 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "boxes/generic_box.h"
+#include "ui/layers/generic_box.h"
 
 namespace Api {
 struct SendOptions;
 } // namespace Api
 
-enum class SendMenuType;
+namespace SendMenu {
+enum class Type;
+} // namespace SendMenu
 
 namespace HistoryView {
 
 [[nodiscard]] TimeId DefaultScheduleTime();
+[[nodiscard]] bool CanScheduleUntilOnline(not_null<PeerData*> peer);
+
 void ScheduleBox(
-	not_null<GenericBox*> box,
-	SendMenuType type,
-	FnMut<void(Api::SendOptions)> done,
+	not_null<Ui::GenericBox*> box,
+	SendMenu::Type type,
+	Fn<void(Api::SendOptions)> done,
 	TimeId time);
 
 template <typename Guard, typename Submit>
-[[nodiscard]] object_ptr<GenericBox> PrepareScheduleBox(
+[[nodiscard]] object_ptr<Ui::GenericBox> PrepareScheduleBox(
 		Guard &&guard,
-		SendMenuType type,
-		Submit &&submit) {
+		SendMenu::Type type,
+		Submit &&submit,
+		TimeId scheduleTime = DefaultScheduleTime()) {
 	return Box(
 		ScheduleBox,
 		type,
 		crl::guard(std::forward<Guard>(guard), std::forward<Submit>(submit)),
-		DefaultScheduleTime());
+		scheduleTime);
 }
 
 } // namespace HistoryView

@@ -9,7 +9,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "passport/passport_panel_controller.h"
 #include "lang/lang_keys.h"
-#include "platform/platform_info.h"
+#include "base/platform/base_platform_info.h"
 #include "ui/widgets/input_fields.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/buttons.h"
@@ -19,7 +19,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "main/main_session.h"
 #include "data/data_user.h"
 #include "data/data_countries.h"
-#include "styles/style_boxes.h"
+#include "styles/style_layers.h"
 #include "styles/style_passport.h"
 
 namespace Passport {
@@ -381,7 +381,7 @@ void CountryRow::chooseCountry() {
 	const auto top = _value.current();
 	const auto name = Data::CountryNameByISO2(top);
 	const auto isoByPhone = Data::CountryISO2ByPhone(
-		Auth().user()->phone());
+		_controller->bot()->session().user()->phone());
 	const auto box = _controller->show(Box<CountrySelectBox>(!name.isEmpty()
 		? top
 		: !isoByPhone.isEmpty()
@@ -680,7 +680,7 @@ void DateRow::paintEvent(QPaintEvent *e) {
 	auto borderShownDegree = _a_borderShown.value(1.);
 	auto borderOpacity = _a_borderOpacity.value(_borderVisible ? 1. : 0.);
 	if (_st.borderActive && (borderOpacity > 0.)) {
-		auto borderStart = snap(_borderAnimationStart, 0, width);
+		auto borderStart = std::clamp(_borderAnimationStart, 0, width);
 		auto borderFrom = qRound(borderStart * (1. - borderShownDegree));
 		auto borderTo = borderStart + qRound((width - borderStart) * borderShownDegree);
 		if (borderTo > borderFrom) {

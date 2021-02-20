@@ -60,6 +60,8 @@ struct FileLocation {
 	}
 };
 
+bool RefreshFileReference(FileLocation &to, const FileLocation &from);
+
 struct File {
 	enum class SkipReason {
 		None,
@@ -207,6 +209,7 @@ struct User {
 	int32 id;
 	bool isBot = false;
 	bool isSelf = false;
+	bool isReplies = false;
 
 	MTPInputUser input = MTP_inputUserEmpty();
 
@@ -218,6 +221,7 @@ std::map<int32, User> ParseUsersList(const MTPVector<MTPUser> &data);
 
 struct Chat {
 	int32 id = 0;
+	int32 migratedToChannelId = 0;
 	Utf8String title;
 	Utf8String username;
 	bool isBroadcast = false;
@@ -237,7 +241,7 @@ struct Peer {
 	const User *user() const;
 	const Chat *chat() const;
 
-	base::variant<User, Chat> data;
+	std::variant<User, Chat> data;
 
 };
 
@@ -306,7 +310,8 @@ struct UnsupportedMedia {
 };
 
 struct Media {
-	base::optional_variant<
+	std::variant<
+		v::null_t,
 		Photo,
 		Document,
 		SharedContact,
@@ -325,6 +330,7 @@ struct Media {
 };
 
 struct ParseMediaContext {
+	PeerId selfPeerId = 0;
 	int photos = 0;
 	int audios = 0;
 	int videos = 0;
@@ -444,8 +450,25 @@ struct ActionContactSignUp {
 struct ActionPhoneNumberRequest {
 };
 
+struct ActionGeoProximityReached {
+	PeerId fromId = 0;
+	PeerId toId = 0;
+	int distance = 0;
+	bool fromSelf = false;
+	bool toSelf = false;
+};
+
+struct ActionGroupCall {
+	int duration = 0;
+};
+
+struct ActionInviteToGroupCall {
+	std::vector<int32> userIds;
+};
+
 struct ServiceAction {
-	base::optional_variant<
+	std::variant<
+		v::null_t,
 		ActionChatCreate,
 		ActionChatEditTitle,
 		ActionChatEditPhoto,
@@ -466,7 +489,10 @@ struct ServiceAction {
 		ActionBotAllowed,
 		ActionSecureValuesSent,
 		ActionContactSignUp,
-		ActionPhoneNumberRequest> content;
+		ActionPhoneNumberRequest,
+		ActionGeoProximityReached,
+		ActionGroupCall,
+		ActionInviteToGroupCall> content;
 };
 
 ServiceAction ParseServiceAction(
@@ -493,7 +519,8 @@ struct TextPart {
 		Cashtag,
 		Underline,
 		Strike,
-		Blockquote
+		Blockquote,
+		BankCard,
 	};
 	Type type = Type::Text;
 	Utf8String text;
@@ -505,16 +532,19 @@ struct Message {
 	int32 chatId = 0;
 	TimeId date = 0;
 	TimeId edited = 0;
-	int32 fromId = 0;
-	PeerId toId = 0;
+	PeerId fromId = 0;
+	PeerId peerId = 0;
+	PeerId selfId = 0;
 	PeerId forwardedFromId = 0;
 	Utf8String forwardedFromName;
 	TimeId forwardedDate = 0;
 	bool forwarded = false;
+	bool showForwardedAsOriginal = false;
 	PeerId savedFromChatId = 0;
 	Utf8String signature;
 	int32 viaBotId = 0;
 	int32 replyToMsgId = 0;
+	PeerId replyToPeerId = 0;
 	std::vector<TextPart> text;
 	Media media;
 	ServiceAction action;
@@ -526,11 +556,18 @@ struct Message {
 	const Image &thumb() const;
 };
 
+struct FileOrigin {
+	int split = 0;
+	MTPInputPeer peer;
+	int32 messageId = 0;
+};
+
 Message ParseMessage(
 	ParseMediaContext &context,
 	const MTPMessage &data,
 	const QString &mediaFolder);
 std::map<uint64, Message> ParseMessagesList(
+	PeerId selfId,
 	const MTPVector<MTPMessage> &data,
 	const QString &mediaFolder);
 
@@ -538,6 +575,7 @@ struct DialogInfo {
 	enum class Type {
 		Unknown,
 		Self,
+		Replies,
 		Personal,
 		Bot,
 		PrivateGroup,
@@ -554,6 +592,9 @@ struct DialogInfo {
 	int32 topMessageId = 0;
 	TimeId topMessageDate = 0;
 	PeerId peerId = 0;
+
+	MTPInputPeer migratedFromInput = MTP_inputPeerEmpty();
+	int32 migratedToChannelId = 0;
 
 	// User messages splits which contained that dialog.
 	std::vector<int> splits;
@@ -585,6 +626,11 @@ DialogsInfo ParseDialogsInfo(
 	const MTPInputPeer &singlePeer,
 	const MTPmessages_Chats &data);
 DialogsInfo ParseLeftChannelsInfo(const MTPmessages_Chats &data);
+bool AddMigrateFromSlice(
+	DialogInfo &to,
+	const DialogInfo &from,
+	int splitIndex,
+	int splitsCount);
 void FinalizeDialogsInfo(DialogsInfo &info, const Settings &settings);
 
 struct MessagesSlice {
@@ -598,6 +644,7 @@ MessagesSlice ParseMessagesSlice(
 	const MTPVector<MTPUser> &users,
 	const MTPVector<MTPChat> &chats,
 	const QString &mediaFolder);
+MessagesSlice AdjustMigrateMessageIds(MessagesSlice slice);
 
 bool SingleMessageBefore(
 	const MTPmessages_Messages &data,

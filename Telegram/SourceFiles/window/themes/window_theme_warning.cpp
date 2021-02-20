@@ -7,13 +7,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/themes/window_theme_warning.h"
 
-#include "styles/style_boxes.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/shadow.h"
 #include "ui/ui_utility.h"
+#include "ui/cached_round_corners.h"
 #include "window/themes/window_theme.h"
 #include "lang/lang_keys.h"
-#include "app.h"
+#include "styles/style_layers.h"
+#include "styles/style_boxes.h"
 
 namespace Window {
 namespace Theme {
@@ -61,7 +62,7 @@ void WarningWidget::paintEvent(QPaintEvent *e) {
 	}
 
 	Ui::Shadow::paint(p, _inner, width(), st::boxRoundShadow);
-	App::roundRect(p, _inner, st::boxBg, BoxCorners);
+	Ui::FillRoundRect(p, _inner, st::boxBg, Ui::BoxCorners);
 
 	p.setFont(st::boxTitleFont);
 	p.setPen(st::boxTitleFg);
@@ -80,9 +81,9 @@ void WarningWidget::resizeEvent(QResizeEvent *e) {
 }
 
 void WarningWidget::updateControlsGeometry() {
-	auto left = _inner.x() + _inner.width() - st::boxButtonPadding.right() - _keepChanges->width();
-	_keepChanges->moveToLeft(left, _inner.y() + _inner.height() - st::boxButtonPadding.bottom() - _keepChanges->height());
-	_revert->moveToLeft(left - st::boxButtonPadding.left() - _revert->width(), _keepChanges->y());
+	auto left = _inner.x() + _inner.width() - st::defaultBox.buttonPadding.right() - _keepChanges->width();
+	_keepChanges->moveToLeft(left, _inner.y() + _inner.height() - st::defaultBox.buttonPadding.bottom() - _keepChanges->height());
+	_revert->moveToLeft(left - st::defaultBox.buttonPadding.left() - _revert->width(), _keepChanges->y());
 }
 
 void WarningWidget::refreshLang() {

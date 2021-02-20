@@ -7,7 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "mtproto/connection_tcp.h"
 
-#include "mtproto/mtp_abstract_socket.h"
+#include "mtproto/details/mtproto_abstract_socket.h"
 #include "base/bytes.h"
 #include "base/openssl_help.h"
 #include "base/qthelp_url.h"
@@ -17,7 +17,7 @@ extern "C" {
 } // extern "C"
 
 namespace MTP {
-namespace internal {
+namespace details {
 namespace {
 
 constexpr auto kPacketSizeMax = int(0x01000000 * sizeof(mtpPrime));
@@ -192,11 +192,11 @@ bytes::span TcpConnection::Protocol::VersionD::finalizePacket(
 	Expects(buffer.size() > 2 && buffer.size() < 0x1000003U);
 
 	const auto intsSize = uint32(buffer.size() - 2);
-	const auto padding = rand_value<uint32>() & 0x0F;
+	const auto padding = openssl::RandomValue<uint32>() & 0x0F;
 	const auto bytesSize = intsSize * sizeof(mtpPrime) + padding;
 	buffer[1] = bytesSize;
 	for (auto added = 0; added < padding; added += 4) {
-		buffer.push_back(rand_value<mtpPrime>());
+		buffer.push_back(openssl::RandomValue<mtpPrime>());
 	}
 
 	return bytes::make_span(buffer).subspan(4, 4 + bytesSize);
@@ -244,7 +244,7 @@ TcpConnection::TcpConnection(
 	const ProxyData &proxy)
 : AbstractConnection(thread, proxy)
 , _instance(instance)
-, _checkNonce(rand_value<MTPint128>()) {
+, _checkNonce(openssl::RandomValue<MTPint128>()) {
 }
 
 ConnectionPointer TcpConnection::clone(const ProxyData &proxy) {
@@ -665,5 +665,5 @@ void TcpConnection::socketError() {
 
 TcpConnection::~TcpConnection() = default;
 
-} // namespace internal
+} // namespace details
 } // namespace MTP

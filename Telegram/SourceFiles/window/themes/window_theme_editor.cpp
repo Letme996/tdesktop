@@ -25,6 +25,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/ui_utility.h"
 #include "base/parse_helper.h"
 #include "base/zlib_help.h"
+#include "base/call_delayed.h"
 #include "core/file_utilities.h"
 #include "core/application.h"
 #include "boxes/edit_color_box.h"
@@ -33,6 +34,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "app.h"
 #include "styles/style_window.h"
 #include "styles/style_dialogs.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 
 namespace Window {
@@ -418,7 +420,7 @@ Editor::Inner::Inner(QWidget *parent, const QString &path) : TWidget(parent)
 
 		if (update.type == BackgroundUpdate::Type::TestingTheme) {
 			Revert();
-			App::CallDelayed(st::slideDuration, this, [] {
+			base::call_delayed(st::slideDuration, this, [] {
 				Ui::show(Box<InformBox>(
 					tr::lng_theme_editor_cant_change_theme(tr::now)));
 			});
@@ -525,7 +527,7 @@ void Editor::Inner::paintEvent(QPaintEvent *e) {
 	p.setFont(st::boxTitleFont);
 	p.setPen(st::windowFg);
 	if (!_newRows->isHidden()) {
-		p.drawTextLeft(st::themeEditorMargin.left(), _existingRows->y() + _existingRows->height() + st::boxLayerTitlePosition.y(), width(), tr::lng_theme_editor_new_keys(tr::now));
+		p.drawTextLeft(st::themeEditorMargin.left(), _existingRows->y() + _existingRows->height() + st::boxTitlePosition.y(), width(), tr::lng_theme_editor_new_keys(tr::now));
 	}
 }
 
@@ -535,7 +537,7 @@ int Editor::Inner::resizeGetHeight(int newWidth) {
 	_newRows->resizeToWidth(rowsWidth);
 
 	_existingRows->moveToLeft(0, 0);
-	_newRows->moveToLeft(0, _existingRows->height() + st::boxLayerTitleHeight);
+	_newRows->moveToLeft(0, _existingRows->height() + st::boxTitleHeight);
 
 	auto lowest = (_newRows->isHidden() ? _existingRows : _newRows).data();
 
@@ -556,7 +558,7 @@ bool Editor::Inner::readData() {
 				auto result = readColor(name, row.value.data() + 1, row.value.size() - 1);
 				Assert(!result.error);
 				_newRows->feed(name, result.color);
-				//if (!_newRows->feedFallbackName(name, str_const_toString(row.fallback))) {
+				//if (!_newRows->feedFallbackName(name, row.fallback.utf16())) {
 				//	Unexpected("Row for fallback not found");
 				//}
 			} else {
@@ -648,9 +650,9 @@ Editor::Editor(
 : _window(window)
 , _cloud(cloud)
 , _scroll(this, st::themesScroll)
-, _close(this, st::contactsMultiSelect.fieldCancel)
+, _close(this, st::defaultMultiSelect.fieldCancel)
 , _menuToggle(this, st::themesMenuToggle)
-, _select(this, st::contactsMultiSelect, tr::lng_country_ph())
+, _select(this, st::defaultMultiSelect, tr::lng_country_ph())
 , _leftShadow(this)
 , _topShadow(this)
 , _save(this, tr::lng_theme_editor_save_button(tr::now).toUpper(), st::dialogsUpdateButton) {
@@ -673,7 +675,9 @@ Editor::Editor(
 		});
 	});
 	_inner->setFocusCallback([this] {
-		App::CallDelayed(2 * st::boxDuration, this, [this] { _select->setInnerFocus(); });
+		base::call_delayed(2 * st::boxDuration, this, [this] {
+			_select->setInnerFocus();
+		});
 	});
 	_inner->setScrollCallback([this](int top, int bottom) {
 		_scroll->scrollToY(top, bottom);
@@ -698,20 +702,20 @@ void Editor::showMenu() {
 	if (_menu) {
 		return;
 	}
-	_menu.create(this);
-	_menu->setHiddenCallback([weak = Ui::MakeWeak(this), menu = _menu.data()]{
+	_menu = base::make_unique_q<Ui::DropdownMenu>(this);
+	_menu->setHiddenCallback([weak = Ui::MakeWeak(this), menu = _menu.get()]{
 		menu->deleteLater();
 		if (weak && weak->_menu == menu) {
 			weak->_menu = nullptr;
 			weak->_menuToggle->setForceRippled(false);
 		}
 	});
-	_menu->setShowStartCallback(crl::guard(this, [this, menu = _menu.data()]{
+	_menu->setShowStartCallback(crl::guard(this, [this, menu = _menu.get()]{
 		if (_menu == menu) {
 			_menuToggle->setForceRippled(true);
 		}
 	}));
-	_menu->setHideStartCallback(crl::guard(this, [this, menu = _menu.data()]{
+	_menu->setHideStartCallback(crl::guard(this, [this, menu = _menu.get()]{
 		if (_menu == menu) {
 			_menuToggle->setForceRippled(false);
 		}
@@ -719,12 +723,12 @@ void Editor::showMenu() {
 
 	_menuToggle->installEventFilter(_menu);
 	_menu->addAction(tr::lng_theme_editor_menu_export(tr::now), [=] {
-		App::CallDelayed(st::defaultRippleAnimation.hideDuration, this, [=] {
+		base::call_delayed(st::defaultRippleAnimation.hideDuration, this, [=] {
 			exportTheme();
 		});
 	});
 	_menu->addAction(tr::lng_theme_editor_menu_import(tr::now), [=] {
-		App::CallDelayed(st::defaultRippleAnimation.hideDuration, this, [=] {
+		base::call_delayed(st::defaultRippleAnimation.hideDuration, this, [=] {
 			importTheme();
 		});
 	});
@@ -854,8 +858,8 @@ void Editor::keyPressEvent(QKeyEvent *e) {
 	if (e->key() == Qt::Key_Escape) {
 		if (!_select->getQuery().isEmpty()) {
 			_select->clearQuery();
-		} else if (auto window = App::wnd()) {
-			window->setInnerFocus();
+		} else {
+			_window->widget()->setInnerFocus();
 		}
 	} else if (e->key() == Qt::Key_Down) {
 		_inner->selectSkip(1);
@@ -888,25 +892,20 @@ void Editor::closeWithConfirmation() {
 		closeEditor();
 		return;
 	}
-	const auto box = std::make_shared<QPointer<BoxContent>>();
-	const auto close = crl::guard(this, [=] {
+	const auto close = crl::guard(this, [=](Fn<void()> &&close) {
 		Background()->clearEditingTheme(ClearEditing::RevertChanges);
 		closeEditor();
-		if (*box) {
-			(*box)->closeBox();
-		}
+		close();
 	});
-	*box = _window->show(Box<ConfirmBox>(
+	_window->show(Box<ConfirmBox>(
 		tr::lng_theme_editor_sure_close(tr::now),
 		tr::lng_close(tr::now),
 		close));
 }
 
 void Editor::closeEditor() {
-	if (const auto window = App::wnd()) {
-		window->showRightColumn(nullptr);
-		Background()->clearEditingTheme();
-	}
+	_window->widget()->showRightColumn(nullptr);
+	Background()->clearEditingTheme();
 }
 
 } // namespace Theme

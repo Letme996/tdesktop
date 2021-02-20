@@ -28,7 +28,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "lang/lang_keys.h"
 #include "facades.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 #include "styles/style_window.h"
 #include "styles/style_info.h"
 
@@ -97,7 +97,7 @@ object_ptr<Window::SectionWidget> SectionMemento::createWidget(
 	}
 	auto result = object_ptr<Widget>(parent, controller, _channel);
 	result->setInternalState(geometry, this);
-	return std::move(result);
+	return result;
 }
 
 FixedBar::FixedBar(
@@ -107,7 +107,10 @@ FixedBar::FixedBar(
 , _controller(controller)
 , _channel(channel)
 , _field(this, st::historyAdminLogSearchField, tr::lng_dlg_filter())
-, _backButton(this, tr::lng_admin_log_title_all(tr::now))
+, _backButton(
+	this,
+	&controller->session(),
+	tr::lng_admin_log_title_all(tr::now))
 , _search(this, st::topBarSearch)
 , _cancel(this, st::historyAdminLogCancelSearch)
 , _filter(this, tr::lng_admin_log_filter(), st::topBarButton) {
@@ -291,7 +294,11 @@ Widget::Widget(
 
 	connect(_scroll, &Ui::ScrollArea::scrolled, this, [this] { onScroll(); });
 
-	_whatIsThis->setClickedCallback([=] { Ui::show(Box<InformBox>(tr::lng_admin_log_about_text(tr::now))); });
+	_whatIsThis->setClickedCallback([=] {
+		Ui::show(Box<InformBox>(channel->isMegagroup()
+			? tr::lng_admin_log_about_text(tr::now)
+			: tr::lng_admin_log_about_text_channel(tr::now)));
+	});
 
 	setupShortcuts();
 }
@@ -352,7 +359,9 @@ void Widget::setInternalState(const QRect &geometry, not_null<SectionMemento*> m
 void Widget::setupShortcuts() {
 	Shortcuts::Requests(
 	) | rpl::filter([=] {
-		return isActiveWindow() && !Ui::isLayerShown() && inFocusChain();
+		return Ui::AppInFocus()
+			&& Ui::InFocusChain(this)
+			&& !Ui::isLayerShown();
 	}) | rpl::start_with_next([=](not_null<Shortcuts::Request*> request) {
 		using Command = Shortcuts::Command;
 		request->check(Command::Search, 2) && request->handle([=] {
@@ -362,10 +371,10 @@ void Widget::setupShortcuts() {
 	}, lifetime());
 }
 
-std::unique_ptr<Window::SectionMemento> Widget::createMemento() {
-	auto result = std::make_unique<SectionMemento>(channel());
+std::shared_ptr<Window::SectionMemento> Widget::createMemento() {
+	auto result = std::make_shared<SectionMemento>(channel());
 	saveState(result.get());
-	return std::move(result);
+	return result;
 }
 
 void Widget::saveState(not_null<SectionMemento*> memento) {
@@ -426,7 +435,7 @@ void Widget::paintEvent(QPaintEvent *e) {
 	//auto ms = crl::now();
 	//_historyDownShown.step(ms);
 
-	SectionWidget::PaintBackground(this, e->rect());
+	SectionWidget::PaintBackground(controller(), this, e->rect());
 }
 
 void Widget::onScroll() {
@@ -444,11 +453,11 @@ void Widget::showFinishedHook() {
 	_fixedBar->setAnimatingMode(false);
 }
 
-bool Widget::wheelEventFromFloatPlayer(QEvent *e) {
+bool Widget::floatPlayerHandleWheelEvent(QEvent *e) {
 	return _scroll->viewportEvent(e);
 }
 
-QRect Widget::rectForFloatPlayer() const {
+QRect Widget::floatPlayerAvailableRect() {
 	return mapToGlobal(_scroll->geometry());
 }
 

@@ -32,16 +32,25 @@ public:
 		[[nodiscard]] virtual DocumentData *document() {
 			return nullptr;
 		}
-		virtual void clearStickerLoopPlayed() {
+		virtual void stickerClearLoopPlayed() {
+		}
+		virtual std::unique_ptr<Lottie::SinglePlayer> stickerTakeLottie(
+			not_null<DocumentData*> data,
+			const Lottie::ColorReplacements *replacements);
+		virtual bool hasHeavyPart() const {
+			return false;
 		}
 		virtual void unloadHeavyPart() {
 		}
 		virtual void refreshLink() {
 		}
+		[[nodiscard]] virtual bool hidesForwardedInfo() {
+			return true;
+		}
 		[[nodiscard]] virtual bool alwaysShowOutTimestamp() {
 			return false;
 		}
-		virtual ~Content() = 0;
+		virtual ~Content() = default;
 	};
 
 	UnwrappedMedia(
@@ -73,26 +82,44 @@ public:
 		return true;
 	}
 	bool hidesForwardedInfo() const override {
-		return true;
+		return _content->hidesForwardedInfo();
 	}
-	void clearStickerLoopPlayed() override {
-		_content->clearStickerLoopPlayed();
+	void stickerClearLoopPlayed() override {
+		_content->stickerClearLoopPlayed();
 	}
+	std::unique_ptr<Lottie::SinglePlayer> stickerTakeLottie(
+		not_null<DocumentData*> data,
+		const Lottie::ColorReplacements *replacements) override;
 
+	bool hasHeavyPart() const override {
+		return _content->hasHeavyPart();
+	}
 	void unloadHeavyPart() override {
 		_content->unloadHeavyPart();
 	}
 
 private:
-	int surroundingHeight(
+	struct SurroundingInfo {
+		int height = 0;
+		int forwardedHeight = 0;
+		bool forwardedBreakEverywhere = false;
+
+		explicit operator bool() const {
+			return (height > 0);
+		}
+	};
+	[[nodiscard]] SurroundingInfo surroundingInfo(
 		const HistoryMessageVia *via,
-		const HistoryMessageReply *reply) const;
+		const HistoryMessageReply *reply,
+		const HistoryMessageForwarded *forwarded,
+		int outerw) const;
 	void drawSurrounding(
 		Painter &p,
 		const QRect &inner,
 		bool selected,
 		const HistoryMessageVia *via,
-		const HistoryMessageReply *reply) const;
+		const HistoryMessageReply *reply,
+		const HistoryMessageForwarded *forwarded) const;
 
 	QSize countOptimalSize() override;
 	QSize countCurrentSize(int newWidth) override;
@@ -100,13 +127,17 @@ private:
 	bool needInfoDisplay() const;
 	int additionalWidth(
 		const HistoryMessageVia *via,
-		const HistoryMessageReply *reply) const;
+		const HistoryMessageReply *reply,
+		const HistoryMessageForwarded *forwarded) const;
 
-	inline int calculateFullRight(const QRect &inner) const;
-	inline QPoint calculateFastActionPosition(
+	int calculateFullRight(const QRect &inner) const;
+	QPoint calculateFastActionPosition(
 		int fullBottom,
 		int replyRight,
-		int fullRight) const;
+		int fullRight,
+		QSize size) const;
+
+	const HistoryMessageForwarded *getDisplayedForwardedInfo() const;
 
 	std::unique_ptr<Content> _content;
 	QSize _contentSize;

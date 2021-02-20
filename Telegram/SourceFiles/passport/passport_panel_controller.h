@@ -9,6 +9,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "passport/passport_form_view_controller.h"
 #include "passport/passport_form_controller.h"
+#include "ui/layers/layer_widget.h"
+
+namespace Ui {
+class BoxContent;
+} // namespace Ui
 
 namespace Passport {
 
@@ -59,25 +64,8 @@ struct ScopeError {
 	// FileKey - file_hash error (bad scan / selfie / translation)
 	// General - general value error (or scan / translation missing)
 	// QString - data_hash with such key error (bad value)
-	base::variant<FileKey, General, QString> key;
+	std::variant<FileKey, General, QString> key;
 	QString text;
-};
-
-class BoxPointer {
-public:
-	BoxPointer(QPointer<BoxContent> value = nullptr);
-	BoxPointer(BoxPointer &&other);
-	BoxPointer &operator=(BoxPointer &&other);
-	~BoxPointer();
-
-	BoxContent *get() const;
-	operator BoxContent*() const;
-	explicit operator bool() const;
-	BoxContent *operator->() const;
-
-private:
-	QPointer<BoxContent> _value;
-
 };
 
 class PanelController : public ViewController {
@@ -132,8 +120,8 @@ public:
 	void cancelEditScope();
 
 	void showBox(
-		object_ptr<BoxContent> box,
-		LayerOptions options,
+		object_ptr<Ui::BoxContent> box,
+		Ui::LayerOptions options,
 		anim::type animated) override;
 	void showToast(const QString &text) override;
 	void suggestReset(Fn<void()> callback) override;
@@ -182,15 +170,15 @@ private:
 
 	std::unique_ptr<Panel> _panel;
 	Fn<bool()> _panelHasUnsavedChanges;
-	QPointer<BoxContent> _confirmForgetChangesBox;
-	std::vector<BoxPointer> _editScopeBoxes;
+	QPointer<Ui::BoxContent> _confirmForgetChangesBox;
+	std::vector<Ui::BoxPointer> _editScopeBoxes;
 	Scope *_editScope = nullptr;
 	const Value *_editValue = nullptr;
 	const Value *_editDocument = nullptr;
-	BoxPointer _scopeDocumentTypeBox;
-	std::map<not_null<const Value*>, BoxPointer> _verificationBoxes;
+	Ui::BoxPointer _scopeDocumentTypeBox;
+	std::map<not_null<const Value*>, Ui::BoxPointer> _verificationBoxes;
 
-	BoxPointer _resetBox;
+	Ui::BoxPointer _resetBox;
 
 	rpl::lifetime _lifetime;
 

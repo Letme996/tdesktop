@@ -21,11 +21,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/toast/toast.h"
 #include "ui/rp_widget.h"
 #include "ui/countryinput.h"
+#include "ui/text/format_values.h"
 #include "core/update_checker.h"
 #include "data/data_countries.h"
-#include "layout.h"
 #include "app.h"
-#include "styles/style_boxes.h"
+#include "styles/style_layers.h"
 
 namespace Passport {
 namespace {
@@ -44,7 +44,7 @@ ScanInfo CollectScanInfo(const EditFile &file) {
 			if (file.fields.downloadOffset < 0) {
 				return tr::lng_attach_failed(tr::now);
 			} else if (file.fields.downloadOffset < file.fields.size) {
-				return formatDownloadText(
+				return Ui::FormatDownloadText(
 					file.fields.downloadOffset,
 					file.fields.size);
 			} else {
@@ -58,7 +58,7 @@ ScanInfo CollectScanInfo(const EditFile &file) {
 			if (file.uploadData->offset < 0) {
 				return tr::lng_attach_failed(tr::now);
 			} else if (file.uploadData->fullId) {
-				return formatDownloadText(
+				return Ui::FormatDownloadText(
 					file.uploadData->offset,
 					file.uploadData->bytes.size());
 			} else {
@@ -69,7 +69,7 @@ ScanInfo CollectScanInfo(const EditFile &file) {
 						base::unixtime::parse(file.fields.date)));
 			}
 		} else {
-			return formatDownloadText(0, file.fields.size);
+			return Ui::FormatDownloadText(0, file.fields.size);
 		}
 	}();
 	return {
@@ -302,7 +302,7 @@ EditDocumentScheme GetDocumentScheme(
 				if (i == end(config.languagesByCountryCode)) {
 					return QString();
 				}
-				return Lang::Current().getNonDefaultValue(
+				return Lang::GetNonDefaultValue(
 					kLanguageNamePrefix + i->second.toUtf8());
 			};
 			result.additionalHeader = [=](const QString &countryCode) {
@@ -568,41 +568,6 @@ ScanInfo::ScanInfo(
 , error(error) {
 }
 
-BoxPointer::BoxPointer(QPointer<BoxContent> value)
-: _value(value) {
-}
-
-BoxPointer::BoxPointer(BoxPointer &&other)
-: _value(base::take(other._value)) {
-}
-
-BoxPointer &BoxPointer::operator=(BoxPointer &&other) {
-	std::swap(_value, other._value);
-	return *this;
-}
-
-BoxPointer::~BoxPointer() {
-	if (const auto strong = get()) {
-		strong->closeBox();
-	}
-}
-
-BoxContent *BoxPointer::get() const {
-	return _value.data();
-}
-
-BoxPointer::operator BoxContent*() const {
-	return get();
-}
-
-BoxPointer::operator bool() const {
-	return get();
-}
-
-BoxContent *BoxPointer::operator->() const {
-	return get();
-}
-
 PanelController::PanelController(not_null<FormController*> form)
 : _form(form)
 , _scopes(ComputeScopes(_form->form())) {
@@ -668,9 +633,7 @@ void PanelController::fillRows(
 rpl::producer<> PanelController::refillRows() const {
 	return rpl::merge(
 		_submitFailed.events(),
-		_form->valueSaveFinished() | rpl::map([] {
-			return rpl::empty_value();
-		}));
+		_form->valueSaveFinished() | rpl::to_empty);
 }
 
 void PanelController::submitForm() {
@@ -713,8 +676,8 @@ void PanelController::setupPassword() {
 
 	const auto &settings = _form->passwordSettings();
 	if (settings.unknownAlgo
-		|| !settings.newAlgo
-		|| !settings.newSecureAlgo) {
+		|| v::is_null(settings.newAlgo)
+		|| v::is_null(settings.newSecureAlgo)) {
 		showUpdateAppBox();
 		return;
 	} else if (settings.request) {
@@ -738,7 +701,7 @@ void PanelController::setupPassword() {
 		box->newPasswordSet(
 		) | rpl::filter([=](const QByteArray &password) {
 			return password.isEmpty();
-		}) | rpl::map([] { return rpl::empty_value(); })
+		}) | rpl::to_empty
 	) | rpl::start_with_next([=] {
 		_form->reloadPassword();
 	}, box->lifetime());
@@ -750,15 +713,16 @@ void PanelController::setupPassword() {
 }
 
 void PanelController::cancelPasswordSubmit() {
-	const auto box = std::make_shared<QPointer<BoxContent>>();
-	*box = show(Box<ConfirmBox>(
+	show(Box<ConfirmBox>(
 		tr::lng_passport_stop_password_sure(tr::now),
 		tr::lng_passport_stop(tr::now),
-		[=] { if (*box) (*box)->closeBox(); _form->cancelPassword(); }));
+		[=](Fn<void()> &&close) { close(); _form->cancelPassword(); }));
 }
 
 void PanelController::validateRecoveryEmail() {
-	auto validation = ConfirmRecoveryEmail(unconfirmedEmailPattern());
+	auto validation = ConfirmRecoveryEmail(
+		&_form->session(),
+		unconfirmedEmailPattern());
 
 	std::move(
 		validation.reloadRequests
@@ -926,7 +890,7 @@ void PanelController::deleteValueSure(bool withDetails) {
 }
 
 void PanelController::suggestReset(Fn<void()> callback) {
-	_resetBox = BoxPointer(show(Box<ConfirmBox>(
+	_resetBox = Ui::BoxPointer(show(Box<ConfirmBox>(
 		Lang::Hard::PassportCorrupted(),
 		Lang::Hard::PassportCorruptedReset(),
 		[=] { resetPassport(callback); },
@@ -940,7 +904,7 @@ void PanelController::resetPassport(Fn<void()> callback) {
 		st::attentionBoxButton,
 		[=] { base::take(_resetBox); callback(); },
 		[=] { suggestReset(callback); }));
-	_resetBox = BoxPointer(box.data());
+	_resetBox = Ui::BoxPointer(box.data());
 }
 
 void PanelController::cancelReset() {
@@ -986,7 +950,7 @@ void PanelController::showUpdateAppBox() {
 			tr::lng_menu_update(tr::now),
 			callback,
 			[=] { _form->cancelSure(); }),
-		LayerOption::KeepOther,
+		Ui::LayerOption::KeepOther,
 		anim::type::instant);
 }
 
@@ -1104,7 +1068,7 @@ void PanelController::editWithUpload(int index, int documentIndex) {
 	const auto widget = _panel->widget();
 	EditScans::ChooseScan(widget.get(), type, [=](QByteArray &&content) {
 		if (_scopeDocumentTypeBox) {
-			_scopeDocumentTypeBox = BoxPointer();
+			_scopeDocumentTypeBox = Ui::BoxPointer();
 		}
 		if (!_editScope || !_editDocument) {
 			startScopeEdit(index, documentIndex);
@@ -1227,7 +1191,7 @@ void PanelController::startScopeEdit(
 			_panelHasUnsavedChanges = [=] {
 				return weak ? weak->hasUnsavedChanges() : false;
 			};
-			return std::move(result);
+			return result;
 		} break;
 		case Scope::Type::PersonalDetails:
 		case Scope::Type::AddressDetails: {
@@ -1245,7 +1209,7 @@ void PanelController::startScopeEdit(
 			_panelHasUnsavedChanges = [=] {
 				return weak ? weak->hasUnsavedChanges() : false;
 			};
-			return std::move(result);
+			return result;
 		} break;
 		case Scope::Type::Phone:
 		case Scope::Type::Email: {
@@ -1462,8 +1426,8 @@ void PanelController::cancelAuthSure() {
 }
 
 void PanelController::showBox(
-		object_ptr<BoxContent> box,
-		LayerOptions options,
+		object_ptr<Ui::BoxContent> box,
+		Ui::LayerOptions options,
 		anim::type animated) {
 	_panel->showBox(std::move(box), options, animated);
 }

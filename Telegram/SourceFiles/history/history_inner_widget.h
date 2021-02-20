@@ -16,6 +16,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace Data {
 struct Group;
+class CloudImageView;
 } // namespace Data
 
 namespace HistoryView {
@@ -49,8 +50,8 @@ public:
 
 	HistoryInner(
 		not_null<HistoryWidget*> historyWidget,
+		not_null<Ui::ScrollArea*> scroll,
 		not_null<Window::SessionController*> controller,
-		Ui::ScrollArea *scroll,
 		not_null<History*> history);
 
 	Main::Session &session() const;
@@ -62,6 +63,7 @@ public:
 
 	void touchScrollUpdated(const QPoint &screenPos);
 
+	void checkHistoryActivation();
 	void recountHistoryGeometry();
 	void updateSize();
 
@@ -81,6 +83,19 @@ public:
 		int from,
 		int till) const;
 	void elementStartStickerLoop(not_null<const Element*> view);
+	[[nodiscard]] crl::time elementHighlightTime(
+		not_null<const HistoryItem*> item);
+	void elementShowPollResults(
+		not_null<PollData*> poll,
+		FullMsgId context);
+	void elementShowTooltip(
+		const TextWithEntities &text,
+		Fn<void()> hiddenCallback);
+	bool elementIsGifPaused();
+	void elementSendBotCommand(
+		const QString &command,
+		const FullMsgId &context);
+	void elementHandleViaClick(not_null<UserData*> bot);
 
 	void updateBotInfo(bool recount = true);
 
@@ -100,12 +115,12 @@ public:
 	int itemTop(const HistoryItem *item) const;
 	int itemTop(const Element *view) const;
 
+	// Returns (view, offset-from-top).
+	[[nodiscard]] std::pair<Element*, int> findViewForPinnedTracking(
+		int top) const;
+
 	void notifyIsBotChanged();
 	void notifyMigrateUpdated();
-
-	// When inline keyboard has moved because of the edition of its item we want
-	// to move scroll position so that mouse points to the same button row.
-	int moveScrollFollowingInlineKeyboard(const HistoryItem *item, int oldKeyboardTop, int newKeyboardTop);
 
 	// Ui::AbstractTooltipShower interface.
 	QString tooltipText() const override;
@@ -199,8 +214,6 @@ private:
 	template <typename Method>
 	void enumerateDates(Method method);
 
-	ClickHandlerPtr hiddenUserpicLink(FullMsgId id);
-
 	void scrollDateCheck();
 	void scrollDateHideByTimer();
 	bool canHaveFromUserpics() const;
@@ -232,7 +245,6 @@ private:
 
 	void itemRemoved(not_null<const HistoryItem*> item);
 	void viewRemoved(not_null<const Element*> view);
-	void refreshView(not_null<HistoryItem*> item);
 
 	void touchResetSpeed();
 	void touchUpdateSpeed();
@@ -300,6 +312,8 @@ private:
 	void deleteAsGroup(FullMsgId itemId);
 	void reportItem(FullMsgId itemId);
 	void reportAsGroup(FullMsgId itemId);
+	void blockSenderItem(FullMsgId itemId);
+	void blockSenderAsGroup(FullMsgId itemId);
 	void copySelectedText();
 
 	// Does any of the shown histories has this flag set.
@@ -307,13 +321,19 @@ private:
 
 	static HistoryInner *Instance;
 
-	not_null<Window::SessionController*> _controller;
-
+	const not_null<HistoryWidget*> _widget;
+	const not_null<Ui::ScrollArea*> _scroll;
+	const not_null<Window::SessionController*> _controller;
 	const not_null<PeerData*> _peer;
 	const not_null<History*> _history;
+
 	History *_migrated = nullptr;
 	int _contentWidth = 0;
 	int _historyPaddingTop = 0;
+
+	// Save visible area coords for painting / pressing userpics.
+	int _visibleAreaTop = 0;
+	int _visibleAreaBottom = 0;
 
 	// With migrated history we perhaps do not need to display
 	// the first _history message date (just skip it by height).
@@ -322,8 +342,6 @@ private:
 	std::unique_ptr<BotAbout> _botAbout;
 	std::unique_ptr<HistoryView::EmptyPainter> _emptyPainter;
 
-	HistoryWidget *_widget = nullptr;
-	Ui::ScrollArea *_scroll = nullptr;
 	mutable History *_curHistory = nullptr;
 	mutable int _curBlock = 0;
 	mutable int _curItem = 0;
@@ -334,6 +352,9 @@ private:
 	SelectedItems _selected;
 
 	base::flat_set<not_null<const HistoryItem*>> _animatedStickersPlayed;
+	base::flat_map<
+		not_null<PeerData*>,
+		std::shared_ptr<Data::CloudImageView>> _userpics, _userpicsCache;
 
 	MouseAction _mouseAction = MouseAction::None;
 	TextSelectType _mouseSelectType = TextSelectType::Letters;
@@ -370,10 +391,6 @@ private:
 	QTimer _touchScrollTimer;
 
 	base::unique_qptr<Ui::PopupMenu> _menu;
-
-	// save visible area coords for painting / pressing userpics
-	int _visibleAreaTop = 0;
-	int _visibleAreaBottom = 0;
 
 	bool _scrollDateShown = false;
 	Ui::Animations::Simple _scrollDateOpacity;

@@ -18,12 +18,12 @@ namespace Members {
 
 Memento::Memento(not_null<Controller*> controller)
 : Memento(
-	controller->peerId(),
+	controller->peer(),
 	controller->migratedPeerId()) {
 }
 
-Memento::Memento(PeerId peerId, PeerId migratedPeerId)
-: ContentMemento(peerId, migratedPeerId) {
+Memento::Memento(not_null<PeerData*> peer, PeerId migratedPeerId)
+: ContentMemento(peer, migratedPeerId) {
 }
 
 Section Memento::section() const {
@@ -38,7 +38,7 @@ object_ptr<ContentWidget> Memento::createWidget(
 		parent,
 		controller);
 	result->setInternalState(geometry, this);
-	return std::move(result);
+	return result;
 }
 
 void Memento::setState(std::unique_ptr<SavedState> state) {
@@ -79,10 +79,10 @@ void Widget::setInternalState(
 	restoreState(memento);
 }
 
-std::unique_ptr<ContentMemento> Widget::doCreateMemento() {
-	auto result = std::make_unique<Memento>(controller());
+std::shared_ptr<ContentMemento> Widget::doCreateMemento() {
+	auto result = std::make_shared<Memento>(controller());
 	saveState(result.get());
-	return std::move(result);
+	return result;
 }
 
 void Widget::saveState(not_null<Memento*> memento) {

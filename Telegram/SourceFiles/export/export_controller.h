@@ -7,9 +7,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include <crl/crl_object_on_queue.h>
 #include "base/variant.h"
-#include "mtproto/rpc_sender.h"
+#include "mtproto/mtproto_rpc_sender.h"
+
+#include <QtCore/QPointer>
+#include <crl/crl_object_on_queue.h>
+
+namespace MTP {
+class Instance;
+} // namespace MTP
 
 namespace Export {
 
@@ -50,6 +56,7 @@ struct ProcessingState {
 	enum class EntityType {
 		Chat,
 		SavedMessages,
+		RepliesMessages,
 		Other,
 	};
 
@@ -90,7 +97,8 @@ struct FinishedState {
 	int64 bytesCount = 0;
 };
 
-using State = base::optional_variant<
+using State = std::variant<
+	v::null_t,
 	PasswordCheckState,
 	ProcessingState,
 	ApiErrorState,
@@ -111,7 +119,9 @@ using State = base::optional_variant<
 
 class Controller {
 public:
-	explicit Controller(const MTPInputPeer &peer);
+	Controller(
+		QPointer<MTP::Instance> mtproto,
+		const MTPInputPeer &peer);
 
 	rpl::producer<State> state() const;
 

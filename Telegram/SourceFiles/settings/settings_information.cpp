@@ -14,7 +14,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/input_fields.h"
 #include "ui/widgets/popup_menu.h"
+#include "ui/widgets/box_content_divider.h"
 #include "ui/special_buttons.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 #include "chat_helpers/emoji_suggestions_widget.h"
 #include "boxes/add_contact_box.h"
 #include "boxes/confirm_box.h"
@@ -23,15 +26,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/username_box.h"
 #include "data/data_user.h"
 #include "info/profile/info_profile_values.h"
-#include "info/profile/info_profile_button.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "window/window_session_controller.h"
 #include "apiwrap.h"
 #include "core/file_utilities.h"
-#include "facades.h"
+#include "base/call_delayed.h"
 #include "app.h"
-#include "styles/style_boxes.h"
+#include "styles/style_layers.h"
 #include "styles/style_settings.h"
 
 #include <QtGui/QGuiApplication>
@@ -46,7 +48,7 @@ void SetupPhoto(
 		not_null<Ui::VerticalLayout*> container,
 		not_null<Window::SessionController*> controller,
 		not_null<UserData*> self) {
-	const auto wrap = container->add(object_ptr<BoxContentDivider>(
+	const auto wrap = container->add(object_ptr<Ui::BoxContentDivider>(
 		container,
 		st::settingsInfoPhotoHeight));
 	const auto photo = Ui::CreateChild<Ui::UserpicButton>(
@@ -61,11 +63,7 @@ void SetupPhoto(
 		st::settingsInfoPhotoSet);
 	upload->setFullRadius(true);
 	upload->addClickHandler([=] {
-		const auto imageExtensions = cImgExtensions();
-		const auto filter = qsl("Image files (*")
-			+ imageExtensions.join(qsl(" *"))
-			+ qsl(");;")
-			+ FileDialog::AllFilesFilter();
+		const auto filter = FileDialog::ImagesOrAllFilter();
 		const auto callback = [=](const FileDialog::OpenResult &result) {
 			if (result.paths.isEmpty() && result.remoteContent.isEmpty()) {
 				return;
@@ -348,7 +346,7 @@ BioManager SetupBio(
 			std::move(done));
 	};
 
-	Info::Profile::BioValue(
+	Info::Profile::AboutValue(
 		self
 	) | rpl::start_with_next([=](const TextWithEntities &text) {
 		const auto wasChanged = (*current != bio->getLastText());
@@ -366,7 +364,7 @@ BioManager SetupBio(
 	) | rpl::start_with_next([=](bool changed) {
 		if (changed) {
 			const auto saved = *generation = std::abs(*generation) + 1;
-			App::CallDelayed(kSaveBioTimeout, bio, [=] {
+			base::call_delayed(kSaveBioTimeout, bio, [=] {
 				if (*generation == saved) {
 					save(nullptr);
 					*generation = 0;
@@ -396,7 +394,7 @@ BioManager SetupBio(
 	QObject::connect(bio, &Ui::InputField::changed, updated);
 	bio->setInstantReplaces(Ui::InstantReplaces::Default());
 	bio->setInstantReplacesEnabled(
-		self->session().settings().replaceEmojiValue());
+		Core::App().settings().replaceEmojiValue());
 	Ui::Emoji::SuggestionsController::Init(
 		container->window(),
 		bio,

@@ -8,26 +8,35 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/local_url_handlers.h"
 
 #include "api/api_text_entities.h"
+#include "api/api_chat_invite.h"
 #include "base/qthelp_regex.h"
 #include "base/qthelp_url.h"
 #include "lang/lang_cloud_manager.h"
 #include "lang/lang_keys.h"
 #include "core/update_checker.h"
 #include "core/application.h"
+#include "core/click_handler_types.h"
 #include "boxes/confirm_phone_box.h"
 #include "boxes/background_preview_box.h"
 #include "boxes/confirm_box.h"
 #include "boxes/share_box.h"
 #include "boxes/connection_box.h"
 #include "boxes/sticker_set_box.h"
+#include "boxes/sessions_box.h"
+#include "boxes/language_box.h"
 #include "passport/passport_form_controller.h"
 #include "window/window_session_controller.h"
 #include "data/data_session.h"
+#include "data/data_document.h"
 #include "data/data_cloud_themes.h"
 #include "data/data_channel.h"
-#include "mainwindow.h"
+#include "media/player/media_player_instance.h"
+#include "window/window_session_controller.h"
+#include "window/window_controller.h"
+#include "settings/settings_common.h"
 #include "mainwidget.h"
 #include "main/main_session.h"
+#include "main/main_session_settings.h"
 #include "apiwrap.h"
 #include "app.h"
 
@@ -37,79 +46,68 @@ namespace {
 using Match = qthelp::RegularExpressionMatch;
 
 bool JoinGroupByHash(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
-	const auto hash = match->captured(1);
-	session->api().checkChatInvite(hash, [=](const MTPChatInvite &result) {
-		Core::App().hideMediaView();
-		result.match([=](const MTPDchatInvite &data) {
-			Ui::show(Box<ConfirmInviteBox>(session, data, [=] {
-				session->api().importChatInvite(hash);
-			}));
-		}, [=](const MTPDchatInviteAlready &data) {
-			if (const auto chat = session->data().processChat(data.vchat())) {
-				App::wnd()->sessionController()->showPeerHistory(
-					chat,
-					Window::SectionShow::Way::Forward);
-			}
-		});
-	}, [=](const RPCError &error) {
-		if (error.code() != 400) {
-			return;
-		}
-		Core::App().hideMediaView();
-		Ui::show(Box<InformBox>(tr::lng_group_invite_bad_link(tr::now)));
-	});
+	Api::CheckChatInvite(controller, match->captured(1));
 	return true;
 }
 
 bool ShowStickerSet(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
 	Core::App().hideMediaView();
 	Ui::show(Box<StickerSetBox>(
-		App::wnd()->sessionController(),
+		controller,
 		MTP_inputStickerSetShortName(MTP_string(match->captured(1)))));
 	return true;
 }
 
 bool ShowTheme(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
-	const auto clickFromMessageId = context.value<FullMsgId>();
+	const auto fromMessageId = context.value<ClickHandlerContext>().itemId;
 	Core::App().hideMediaView();
-	session->data().cloudThemes().resolve(
+	controller->session().data().cloudThemes().resolve(
 		match->captured(1),
-		clickFromMessageId);
+		fromMessageId);
 	return true;
 }
 
+void ShowLanguagesBox() {
+	static auto Guard = base::binary_guard();
+	Guard = LanguageBox::Show();
+}
+
 bool SetLanguage(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	const auto languageId = match->captured(1);
-	Lang::CurrentCloudManager().switchWithWarning(languageId);
+	if (match->capturedRef(1).isEmpty()) {
+		ShowLanguagesBox();
+	} else {
+		const auto languageId = match->captured(2);
+		Lang::CurrentCloudManager().switchWithWarning(languageId);
+	}
 	return true;
 }
 
 bool ShareUrl(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
 	auto params = url_parse_params(
@@ -118,16 +116,18 @@ bool ShareUrl(
 	auto url = params.value(qsl("url"));
 	if (url.isEmpty()) {
 		return false;
+	} else {
+		controller->content()->shareUrlLayer(url, params.value("text"));
+		return true;
 	}
-	App::main()->shareUrlLayer(url, params.value("text"));
-	return true;
+	return false;
 }
 
 bool ConfirmPhone(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
 	auto params = url_parse_params(
@@ -138,47 +138,56 @@ bool ConfirmPhone(
 	if (phone.isEmpty() || hash.isEmpty()) {
 		return false;
 	}
-	ConfirmPhoneBox::start(phone, hash);
+	ConfirmPhoneBox::Start(&controller->session(), phone, hash);
 	return true;
 }
 
 bool ShareGameScore(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
 	const auto params = url_parse_params(
 		match->captured(1),
 		qthelp::UrlParamNameTransform::ToLower);
-	ShareGameScoreByHash(session, params.value(qsl("hash")));
+	ShareGameScoreByHash(&controller->session(), params.value(qsl("hash")));
 	return true;
 }
 
 bool ApplySocksProxy(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
 	auto params = url_parse_params(
 		match->captured(1),
 		qthelp::UrlParamNameTransform::ToLower);
-	ProxiesBoxController::ShowApplyConfirmation(ProxyData::Type::Socks5, params);
+	ProxiesBoxController::ShowApplyConfirmation(
+		MTP::ProxyData::Type::Socks5,
+		params);
 	return true;
 }
 
 bool ApplyMtprotoProxy(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
 	auto params = url_parse_params(
 		match->captured(1),
 		qthelp::UrlParamNameTransform::ToLower);
-	ProxiesBoxController::ShowApplyConfirmation(ProxyData::Type::Mtproto, params);
+	ProxiesBoxController::ShowApplyConfirmation(
+		MTP::ProxyData::Type::Mtproto,
+		params);
 	return true;
 }
 
-bool ShowPassportForm(const QMap<QString, QString> &params) {
+bool ShowPassportForm(
+		Window::SessionController *controller,
+		const QMap<QString, QString> &params) {
+	if (!controller) {
+		return false;
+	}
 	const auto botId = params.value("bot_id", QString()).toInt();
 	const auto scope = params.value("scope", QString());
 	const auto callback = params.value("callback_url", QString());
@@ -187,51 +196,48 @@ bool ShowPassportForm(const QMap<QString, QString> &params) {
 		Passport::NonceNameByScope(scope),
 		QString());
 	const auto errors = params.value("errors", QString());
-	if (const auto window = App::wnd()) {
-		if (const auto controller = window->sessionController()) {
-			controller->showPassportForm(Passport::FormRequest(
-				botId,
-				scope,
-				callback,
-				publicKey,
-				nonce,
-				errors));
-			return true;
-		}
-	}
-	return false;
+	controller->showPassportForm(Passport::FormRequest(
+		botId,
+		scope,
+		callback,
+		publicKey,
+		nonce,
+		errors));
+	return true;
 }
 
 bool ShowPassport(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	return ShowPassportForm(url_parse_params(
-		match->captured(1),
-		qthelp::UrlParamNameTransform::ToLower));
+	return ShowPassportForm(
+		controller,
+		url_parse_params(
+			match->captured(1),
+			qthelp::UrlParamNameTransform::ToLower));
 }
 
 bool ShowWallPaper(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
 	const auto params = url_parse_params(
 		match->captured(1),
 		qthelp::UrlParamNameTransform::ToLower);
 	return BackgroundPreviewBox::Start(
-		session,
+		controller,
 		params.value(qsl("slug")),
 		params);
 }
 
 bool ResolveUsername(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
 	const auto params = url_parse_params(
@@ -246,7 +252,7 @@ bool ResolveUsername(
 		).valid();
 	};
 	if (domain == qsl("telegrampassport")) {
-		return ShowPassportForm(params);
+		return ShowPassportForm(controller, params);
 	} else if (!valid(domain)) {
 		return false;
 	}
@@ -262,29 +268,44 @@ bool ResolveUsername(
 	auto post = (start == qsl("startgroup"))
 		? ShowAtProfileMsgId
 		: ShowAtUnreadMsgId;
-	auto postParam = params.value(qsl("post"));
-	if (auto postId = postParam.toInt()) {
+	const auto postParam = params.value(qsl("post"));
+	if (const auto postId = postParam.toInt()) {
 		post = postId;
 	}
+	const auto commentParam = params.value(qsl("comment"));
+	const auto commentId = commentParam.toInt();
+	const auto threadParam = params.value(qsl("thread"));
+	const auto threadId = threadParam.toInt();
 	const auto gameParam = params.value(qsl("game"));
 	if (!gameParam.isEmpty() && valid(gameParam)) {
 		startToken = gameParam;
 		post = ShowAtGameShareMsgId;
 	}
-	const auto clickFromMessageId = context.value<FullMsgId>();
-	App::main()->openPeerByName(
-		domain,
-		post,
-		startToken,
-		clickFromMessageId);
+	const auto fromMessageId = context.value<ClickHandlerContext>().itemId;
+	using Navigation = Window::SessionNavigation;
+	controller->showPeerByLink(Navigation::PeerByLinkInfo{
+		.usernameOrId = domain,
+		.messageId = post,
+		.repliesInfo = commentId
+			? Navigation::RepliesByLinkInfo{
+				Navigation::CommentId{ commentId }
+			}
+			: threadId
+			? Navigation::RepliesByLinkInfo{
+				Navigation::ThreadId{ threadId }
+			}
+			: Navigation::RepliesByLinkInfo{ v::null },
+		.startToken = startToken,
+		.clickFromMessageId = fromMessageId,
+	});
 	return true;
 }
 
 bool ResolvePrivatePost(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
 	const auto params = url_parse_params(
@@ -292,70 +313,124 @@ bool ResolvePrivatePost(
 		qthelp::UrlParamNameTransform::ToLower);
 	const auto channelId = params.value(qsl("channel")).toInt();
 	const auto msgId = params.value(qsl("post")).toInt();
+	const auto commentParam = params.value(qsl("comment"));
+	const auto commentId = commentParam.toInt();
+	const auto threadParam = params.value(qsl("thread"));
+	const auto threadId = threadParam.toInt();
 	if (!channelId || !IsServerMsgId(msgId)) {
 		return false;
 	}
-	const auto done = [=](not_null<PeerData*> peer) {
-		App::wnd()->sessionController()->showPeerHistory(
-			peer->id,
-			Window::SectionShow::Way::Forward,
-			msgId);
-	};
-	const auto fail = [=] {
-		Ui::show(Box<InformBox>(tr::lng_error_post_link_invalid(tr::now)));
-	};
-	if (const auto channel = session->data().channelLoaded(channelId)) {
-		done(channel);
+	const auto fromMessageId = context.value<ClickHandlerContext>().itemId;
+	using Navigation = Window::SessionNavigation;
+	controller->showPeerByLink(Navigation::PeerByLinkInfo{
+		.usernameOrId = channelId,
+		.messageId = msgId,
+		.repliesInfo = commentId
+			? Navigation::RepliesByLinkInfo{
+				Navigation::CommentId{ commentId }
+			}
+			: threadId
+			? Navigation::RepliesByLinkInfo{
+				Navigation::ThreadId{ threadId }
+			}
+			: Navigation::RepliesByLinkInfo{ v::null },
+		.clickFromMessageId = fromMessageId,
+	});
+	return true;
+}
+
+bool ResolveSettings(
+		Window::SessionController *controller,
+		const Match &match,
+		const QVariant &context) {
+	if (!controller) {
+		return false;
+	}
+	controller->window().activate();
+	const auto section = match->captured(1).mid(1).toLower();
+	if (section.isEmpty()) {
+		controller->window().showSettings();
 		return true;
 	}
-	session->api().request(MTPchannels_GetChannels(
-		MTP_vector<MTPInputChannel>(
-			1,
-			MTP_inputChannel(MTP_int(channelId), MTP_long(0)))
-	)).done([=](const MTPmessages_Chats &result) {
-		result.match([&](const auto &data) {
-			const auto peer = session->data().processChats(data.vchats());
-			if (peer && peer->id == peerFromChannel(channelId)) {
-				done(peer);
-			} else {
-				fail();
-			}
-		});
-	}).fail([=](const RPCError &error) {
-		fail();
-	}).send();
+	if (section == qstr("devices")) {
+		Ui::show(Box<SessionsBox>(&controller->session()));
+		return true;
+	} else if (section == qstr("language")) {
+		ShowLanguagesBox();
+		return true;
+	}
+	const auto type = (section == qstr("folders"))
+		? ::Settings::Type::Folders
+		: ::Settings::Type::Main;
+	controller->showSettings(type);
 	return true;
 }
 
 bool HandleUnknown(
-		Main::Session *session,
+		Window::SessionController *controller,
 		const Match &match,
 		const QVariant &context) {
-	if (!session) {
+	if (!controller) {
 		return false;
 	}
 	const auto request = match->captured(1);
-	const auto callback = [=](const MTPDhelp_deepLinkInfo &result) {
+	const auto callback = crl::guard(controller, [=](const MTPDhelp_deepLinkInfo &result) {
 		const auto text = TextWithEntities{
 			qs(result.vmessage()),
-			Api::EntitiesFromMTP(result.ventities().value_or_empty())
+			Api::EntitiesFromMTP(
+				&controller->session(),
+				result.ventities().value_or_empty())
 		};
 		if (result.is_update_app()) {
-			const auto box = std::make_shared<QPointer<BoxContent>>();
-			const auto callback = [=] {
+			const auto callback = [=](Fn<void()> &&close) {
 				Core::UpdateApplication();
-				if (*box) (*box)->closeBox();
+				close();
 			};
-			*box = Ui::show(Box<ConfirmBox>(
+			Ui::show(Box<ConfirmBox>(
 				text,
 				tr::lng_menu_update(tr::now),
 				callback));
 		} else {
 			Ui::show(Box<InformBox>(text));
 		}
-	};
-	session->api().requestDeepLinkInfo(request, callback);
+	});
+	controller->session().api().requestDeepLinkInfo(request, callback);
 	return true;
+}
+
+bool OpenMediaTimestamp(
+		Window::SessionController *controller,
+		const Match &match,
+		const QVariant &context) {
+	if (!controller) {
+		return false;
+	}
+	const auto time = match->captured(2).toInt();
+	if (time < 0) {
+		return false;
+	}
+	const auto base = match->captured(1);
+	if (base.startsWith(qstr("doc"))) {
+		const auto parts = base.mid(3).split('_');
+		const auto documentId = parts.value(0).toULongLong();
+		const auto itemId = FullMsgId(
+			parts.value(1).toInt(),
+			parts.value(2).toInt());
+		const auto session = &controller->session();
+		const auto document = session->data().document(documentId);
+		session->settings().setMediaLastPlaybackPosition(
+			documentId,
+			time * crl::time(1000));
+		if (document->isVideoFile()) {
+			Core::App().showDocument(
+				document,
+				session->data().message(itemId));
+		} else if (document->isSong()) {
+			Media::Player::instance()->play({ document, itemId });
+		}
+		return true;
+	}
+	return false;
 }
 
 } // namespace
@@ -375,7 +450,7 @@ const std::vector<LocalUrlHandler> &LocalUrlHandlers() {
 			ShowTheme
 		},
 		{
-			qsl("^setlanguage/?\\?lang=([a-zA-Z0-9\\.\\_\\-]+)(&|$)"),
+			qsl("^setlanguage/?(\\?lang=([a-zA-Z0-9\\.\\_\\-]+))?(&|$)"),
 			SetLanguage
 		},
 		{
@@ -415,9 +490,23 @@ const std::vector<LocalUrlHandler> &LocalUrlHandlers() {
 			ResolvePrivatePost
 		},
 		{
+			qsl("^settings(/folders|/devices|/language)?$"),
+			ResolveSettings
+		},
+		{
 			qsl("^([^\\?]+)(\\?|#|$)"),
 			HandleUnknown
-		}
+		},
+	};
+	return Result;
+}
+
+const std::vector<LocalUrlHandler> &InternalUrlHandlers() {
+	static auto Result = std::vector<LocalUrlHandler>{
+		{
+			qsl("^media_timestamp/?\\?base=([a-zA-Z0-9\\.\\_\\-]+)&t=(\\d+)(&|$)"),
+			OpenMediaTimestamp
+		},
 	};
 	return Result;
 }
@@ -432,8 +521,8 @@ QString TryConvertUrlToLocal(QString url) {
 	auto telegramMeMatch = regex_match(qsl("^(https?://)?(www\\.)?(telegram\\.(me|dog)|t\\.me)/(.+)$"), url, matchOptions);
 	if (telegramMeMatch) {
 		auto query = telegramMeMatch->capturedRef(5);
-		if (auto joinChatMatch = regex_match(qsl("^joinchat/([a-zA-Z0-9\\.\\_\\-]+)(\\?|$)"), query, matchOptions)) {
-			return qsl("tg://join?invite=") + url_encode(joinChatMatch->captured(1));
+		if (auto joinChatMatch = regex_match(qsl("^(joinchat/|\\+|\\%20)([a-zA-Z0-9\\.\\_\\-]+)(\\?|$)"), query, matchOptions)) {
+			return qsl("tg://join?invite=") + url_encode(joinChatMatch->captured(2));
 		} else if (auto stickerSetMatch = regex_match(qsl("^addstickers/([a-zA-Z0-9\\.\\_]+)(\\?|$)"), query, matchOptions)) {
 			return qsl("tg://addstickers?set=") + url_encode(stickerSetMatch->captured(1));
 		} else if (auto themeMatch = regex_match(qsl("^addtheme/([a-zA-Z0-9\\.\\_]+)(\\?|$)"), query, matchOptions)) {
@@ -462,8 +551,9 @@ QString TryConvertUrlToLocal(QString url) {
 		} else if (auto bgMatch = regex_match(qsl("^bg/([a-zA-Z0-9\\.\\_\\-]+)(\\?(.+)?)?$"), query, matchOptions)) {
 			const auto params = bgMatch->captured(3);
 			return qsl("tg://bg?slug=") + bgMatch->captured(1) + (params.isEmpty() ? QString() : '&' + params);
-		} else if (auto postMatch = regex_match(qsl("^c/(\\-?\\d+)/(\\d+)(#|$)"), query, matchOptions)) {
-			return qsl("tg://privatepost?channel=%1&post=%2").arg(postMatch->captured(1)).arg(postMatch->captured(2));
+		} else if (auto postMatch = regex_match(qsl("^c/(\\-?\\d+)/(\\d+)(/?\\?|/?$)"), query, matchOptions)) {
+			auto params = query.mid(postMatch->captured(0).size()).toString();
+			return qsl("tg://privatepost?channel=%1&post=%2").arg(postMatch->captured(1)).arg(postMatch->captured(2)) + (params.isEmpty() ? QString() : '&' + params);
 		} else if (auto usernameMatch = regex_match(qsl("^([a-zA-Z0-9\\.\\_]+)(/?\\?|/?$|/(\\d+)/?(?:\\?|$))"), query, matchOptions)) {
 			auto params = query.mid(usernameMatch->captured(0).size()).toString();
 			auto postParam = QString();
@@ -503,7 +593,7 @@ bool InternalPassportLink(const QString &url) {
 }
 
 bool StartUrlRequiresActivate(const QString &url) {
-	return Core::App().locked()
+	return Core::App().passcodeLocked()
 		? true
 		: !InternalPassportLink(url);
 }

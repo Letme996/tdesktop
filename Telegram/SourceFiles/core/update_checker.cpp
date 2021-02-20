@@ -7,19 +7,26 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "core/update_checker.h"
 
-#include "platform/platform_info.h"
+#include "platform/platform_specific.h"
+#include "base/platform/base_platform_info.h"
+#include "base/platform/base_platform_file_utilities.h"
 #include "base/timer.h"
 #include "base/bytes.h"
 #include "base/unixtime.h"
+#include "base/qt_adapters.h"
 #include "storage/localstorage.h"
 #include "core/application.h"
+#include "core/changelogs.h"
 #include "core/click_handler_types.h"
 #include "mainwindow.h"
 #include "main/main_account.h"
+#include "main/main_session.h"
+#include "main/main_domain.h"
 #include "info/info_memento.h"
 #include "info/settings/info_settings_widget.h"
 #include "window/window_session_controller.h"
 #include "settings/settings_intro.h"
+#include "ui/layers/box_content.h"
 #include "app.h"
 
 #include <QtCore/QJsonDocument>
@@ -32,11 +39,11 @@ extern "C" {
 #include <openssl/err.h>
 } // extern "C"
 
-#ifdef Q_OS_WIN // use Lzma SDK for win
+#if defined Q_OS_WIN && !defined DESKTOP_APP_USE_PACKAGED // use Lzma SDK for win
 #include <LzmaLib.h>
-#else // Q_OS_WIN
+#else // Q_OS_WIN && !DESKTOP_APP_USE_PACKAGED
 #include <lzma.h>
-#endif // else of Q_OS_WIN
+#endif // else of Q_OS_WIN && !DESKTOP_APP_USE_PACKAGED
 
 namespace Core {
 namespace {
@@ -51,9 +58,6 @@ bool UpdaterIsDisabled = false;
 #endif // TDESKTOP_DISABLE_AUTOUPDATE
 
 std::weak_ptr<Updater> UpdaterInstance;
-
-using ErrorSignal = void(QNetworkReply::*)(QNetworkReply::NetworkError);
-const auto QNetworkReply_error = ErrorSignal(&QNetworkReply::error);
 
 using Progress = UpdateChecker::Progress;
 using State = UpdateChecker::State;
@@ -171,7 +175,7 @@ private:
 
 class MtpChecker : public Checker {
 public:
-	MtpChecker(QPointer<MTP::Instance> instance, bool testing);
+	MtpChecker(base::weak_ptr<Main::Session> session, bool testing);
 
 	void start() override;
 
@@ -207,7 +211,7 @@ QString UpdatesFolder() {
 }
 
 void ClearAll() {
-	psDeleteDir(UpdatesFolder());
+	base::Platform::DeleteDirectory(UpdatesFolder());
 }
 
 QString FindUpdateFile() {
@@ -220,8 +224,9 @@ QString FindUpdateFile() {
 		if (QRegularExpression(
 			"^("
 			"tupdate|"
+			"tx64upd|"
 			"tmacupd|"
-			"tmac32upd|"
+			"tosxupd|"
 			"tlinuxupd|"
 			"tlinux32upd"
 			")\\d+(_[a-z\\d]+)?$",
@@ -251,11 +256,11 @@ bool UnpackUpdate(const QString &filepath) {
 		return false;
 	}
 
-#ifdef Q_OS_WIN // use Lzma SDK for win
+#if defined Q_OS_WIN && !defined DESKTOP_APP_USE_PACKAGED // use Lzma SDK for win
 	const int32 hSigLen = 128, hShaLen = 20, hPropsLen = LZMA_PROPS_SIZE, hOriginalSizeLen = sizeof(int32), hSize = hSigLen + hShaLen + hPropsLen + hOriginalSizeLen; // header
-#else // Q_OS_WIN
+#else // Q_OS_WIN && !DESKTOP_APP_USE_PACKAGED
 	const int32 hSigLen = 128, hShaLen = 20, hPropsLen = 0, hOriginalSizeLen = sizeof(int32), hSize = hSigLen + hShaLen + hOriginalSizeLen; // header
-#endif // Q_OS_WIN
+#endif // Q_OS_WIN && !DESKTOP_APP_USE_PACKAGED
 
 	QByteArray compressed = input.readAll();
 	int32 compressedLen = compressed.size() - hSize;
@@ -266,7 +271,7 @@ bool UnpackUpdate(const QString &filepath) {
 	input.close();
 
 	QString tempDirPath = cWorkingDir() + qsl("tupdates/temp"), readyFilePath = cWorkingDir() + qsl("tupdates/temp/ready");
-	psDeleteDir(tempDirPath);
+	base::Platform::DeleteDirectory(tempDirPath);
 
 	QDir tempDir(tempDirPath);
 	if (tempDir.exists() || QFile(readyFilePath).exists()) {
@@ -310,14 +315,14 @@ bool UnpackUpdate(const QString &filepath) {
 	uncompressed.resize(uncompressedLen);
 
 	size_t resultLen = uncompressed.size();
-#ifdef Q_OS_WIN // use Lzma SDK for win
+#if defined Q_OS_WIN && !defined DESKTOP_APP_USE_PACKAGED // use Lzma SDK for win
 	SizeT srcLen = compressedLen;
 	int uncompressRes = LzmaUncompress((uchar*)uncompressed.data(), &resultLen, (const uchar*)(compressed.constData() + hSize), &srcLen, (const uchar*)(compressed.constData() + hSigLen + hShaLen), LZMA_PROPS_SIZE);
 	if (uncompressRes != SZ_OK) {
 		LOG(("Update Error: could not uncompress lzma, code: %1").arg(uncompressRes));
 		return false;
 	}
-#else // Q_OS_WIN
+#else // Q_OS_WIN && !DESKTOP_APP_USE_PACKAGED
 	lzma_stream stream = LZMA_STREAM_INIT;
 
 	lzma_ret ret = lzma_stream_decoder(&stream, UINT64_MAX, LZMA_CONCATENATED);
@@ -360,7 +365,7 @@ bool UnpackUpdate(const QString &filepath) {
 		LOG(("Error in decompression: %1 (error code %2)").arg(msg).arg(res));
 		return false;
 	}
-#endif // Q_OS_WIN
+#endif // Q_OS_WIN && !DESKTOP_APP_USE_PACKAGED
 
 	tempDir.mkdir(tempDir.absolutePath());
 
@@ -408,9 +413,9 @@ bool UnpackUpdate(const QString &filepath) {
 			bool executable = false;
 
 			stream >> relativeName >> fileSize >> fileInnerData;
-#if defined Q_OS_MAC || defined Q_OS_LINUX
+#ifdef Q_OS_UNIX
 			stream >> executable;
-#endif // Q_OS_MAC || Q_OS_LINUX
+#endif // Q_OS_UNIX
 			if (stream.status() != QDataStream::Ok) {
 				LOG(("Update Error: cant read file from downloaded stream, status: %1").arg(stream.status()));
 				return false;
@@ -445,7 +450,7 @@ bool UnpackUpdate(const QString &filepath) {
 
 		// create tdata/version file
 		tempDir.mkdir(QDir(tempDirPath + qsl("/tdata")).absolutePath());
-		std::wstring versionString = ((version % 1000) ? QString("%1.%2.%3").arg(int(version / 1000000)).arg(int((version % 1000000) / 1000)).arg(int(version % 1000)) : QString("%1.%2").arg(int(version / 1000000)).arg(int((version % 1000000) / 1000))).toStdWString();
+		std::wstring versionString = FormatVersionDisplay(version).toStdWString();
 
 		const auto versionNum = VersionInt(version);
 		const auto versionLen = VersionInt(versionString.size() * sizeof(VersionChar));
@@ -620,7 +625,7 @@ void HttpChecker::start() {
 	_reply->connect(_reply, &QNetworkReply::finished, [=] {
 		gotResponse();
 	});
-	_reply->connect(_reply, QNetworkReply_error, [=](auto e) {
+	_reply->connect(_reply, base::QNetworkReply_error, [=](auto e) {
 		gotFailure(e);
 	});
 }
@@ -659,7 +664,7 @@ void HttpChecker::clearSentRequest() {
 		return;
 	}
 	reply->disconnect(reply, &QNetworkReply::finished, nullptr, nullptr);
-	reply->disconnect(reply, QNetworkReply_error, nullptr, nullptr);
+	reply->disconnect(reply, base::QNetworkReply_error, nullptr, nullptr);
 	reply->abort();
 	reply->deleteLater();
 	_manager = nullptr;
@@ -813,7 +818,7 @@ void HttpLoaderActor::sendRequest() {
 		&HttpLoaderActor::partFinished);
 	connect(
 		_reply.get(),
-		QNetworkReply_error,
+		base::QNetworkReply_error,
 		this,
 		&HttpLoaderActor::partFailed);
 	connect(
@@ -876,9 +881,11 @@ void HttpLoaderActor::partFailed(QNetworkReply::NetworkError e) {
 	_parent->threadSafeFailed();
 }
 
-MtpChecker::MtpChecker(QPointer<MTP::Instance> instance, bool testing)
+MtpChecker::MtpChecker(
+	base::weak_ptr<Main::Session> session,
+	bool testing)
 : Checker(testing)
-, _mtp(instance) {
+, _mtp(session) {
 }
 
 void MtpChecker::start() {
@@ -890,7 +897,8 @@ void MtpChecker::start() {
 	const auto updaterVersion = Platform::AutoUpdateVersion();
 	const auto feed = "tdhbcfeed"
 		+ (updaterVersion > 1 ? QString::number(updaterVersion) : QString());
-	MTP::ResolveChannel(&_mtp, feed, [=](const MTPInputChannel &channel) {
+	MTP::ResolveChannel(&_mtp, feed, [=](
+			const MTPInputChannel &channel) {
 		_mtp.send(
 			MTPmessages_GetHistory(
 				MTP_inputPeerChannel(
@@ -1032,7 +1040,7 @@ public:
 	int already() const;
 	int size() const;
 
-	void setMtproto(const QPointer<MTP::Instance> &mtproto);
+	void setMtproto(base::weak_ptr<Main::Session> session);
 
 	~Updater();
 
@@ -1077,7 +1085,7 @@ private:
 	Implementation _mtpImplementation;
 	std::shared_ptr<Loader> _activeLoader;
 	bool _usingMtprotoLoader = (cAlphaVersion() != 0);
-	QPointer<MTP::Instance> _mtproto;
+	base::weak_ptr<Main::Session> _session;
 
 	rpl::lifetime _lifetime;
 
@@ -1225,7 +1233,7 @@ void Updater::start(bool forceWait) {
 			std::make_unique<HttpChecker>(_testing));
 		startImplementation(
 			&_mtpImplementation,
-			std::make_unique<MtpChecker>(_mtproto, _testing));
+			std::make_unique<MtpChecker>(_session, _testing));
 
 		_checking.fire({});
 	} else {
@@ -1288,8 +1296,8 @@ void Updater::test() {
 	start(false);
 }
 
-void Updater::setMtproto(const QPointer<MTP::Instance> &mtproto) {
-	_mtproto = mtproto;
+void Updater::setMtproto(base::weak_ptr<Main::Session> session) {
+	_session = session;
 }
 
 void Updater::handleTimeout() {
@@ -1386,9 +1394,9 @@ Updater::~Updater() {
 
 UpdateChecker::UpdateChecker()
 : _updater(GetUpdaterInstance()) {
-	if (IsAppLaunched()) {
-		if (const auto mtproto = Core::App().activeAccount().mtp()) {
-			_updater->setMtproto(mtproto);
+	if (IsAppLaunched() && Core::App().domain().started()) {
+		if (const auto session = Core::App().activeAccount().maybeSession()) {
+			_updater->setMtproto(session);
 		}
 	}
 }
@@ -1422,8 +1430,8 @@ void UpdateChecker::test() {
 	_updater->test();
 }
 
-void UpdateChecker::setMtproto(const QPointer<MTP::Instance> &mtproto) {
-	_updater->setMtproto(mtproto);
+void UpdateChecker::setMtproto(base::weak_ptr<Main::Session> session) {
+	_updater->setMtproto(session);
 }
 
 void UpdateChecker::stop() {
@@ -1508,10 +1516,10 @@ bool checkReadyUpdate() {
 #elif defined Q_OS_MAC // Q_OS_WIN
 	QString curUpdater = (cExeDir() + cExeName() + qsl("/Contents/Frameworks/Updater"));
 	QFileInfo updater(cWorkingDir() + qsl("tupdates/temp/Telegram.app/Contents/Frameworks/Updater"));
-#elif defined Q_OS_LINUX // Q_OS_MAC
+#elif defined Q_OS_UNIX // Q_OS_MAC
 	QString curUpdater = (cExeDir() + qsl("Updater"));
 	QFileInfo updater(cWorkingDir() + qsl("tupdates/temp/Updater"));
-#endif // Q_OS_LINUX
+#endif // Q_OS_UNIX
 	if (!updater.exists()) {
 		QFileInfo current(curUpdater);
 		if (!current.exists()) {
@@ -1545,16 +1553,16 @@ bool checkReadyUpdate() {
 		ClearAll();
 		return false;
 	}
-#elif defined Q_OS_LINUX // Q_OS_MAC
+#elif defined Q_OS_UNIX // Q_OS_MAC
 	if (!linuxMoveFile(QFile::encodeName(updater.absoluteFilePath()).constData(), QFile::encodeName(curUpdater).constData())) {
 		ClearAll();
 		return false;
 	}
-#endif // Q_OS_LINUX
+#endif // Q_OS_UNIX
 
 #ifdef Q_OS_MAC
-	Platform::RemoveQuarantine(QFileInfo(curUpdater).absolutePath());
-	Platform::RemoveQuarantine(updater.absolutePath());
+	base::Platform::RemoveQuarantine(QFileInfo(curUpdater).absolutePath());
+	base::Platform::RemoveQuarantine(updater.absolutePath());
 #endif // Q_OS_MAC
 
 	return true;
@@ -1567,9 +1575,16 @@ void UpdateApplication() {
 			return "https://www.microsoft.com/en-us/store/p/telegram-desktop/9nztwsqntd0s";
 #elif defined OS_MAC_STORE // OS_WIN_STORE
 			return "https://itunes.apple.com/ae/app/telegram-desktop/id946399090";
-#else // OS_WIN_STORE || OS_MAC_STORE
+#elif defined Q_OS_UNIX && !defined Q_OS_MAC // OS_WIN_STORE || OS_MAC_STORE
+			if (Platform::InFlatpak()) {
+				return "https://flathub.org/apps/details/org.telegram.desktop";
+			} else if (Platform::InSnap()) {
+				return "https://snapcraft.io/telegram-desktop";
+			}
 			return "https://desktop.telegram.org";
-#endif // OS_WIN_STORE || OS_MAC_STORE
+#else // OS_WIN_STORE || OS_MAC_STORE || (defined Q_OS_UNIX && !defined Q_OS_MAC)
+			return "https://desktop.telegram.org";
+#endif // OS_WIN_STORE || OS_MAC_STORE || (defined Q_OS_UNIX && !defined Q_OS_MAC)
 		}();
 		UrlClickHandler::Open(url);
 	} else {
@@ -1577,13 +1592,13 @@ void UpdateApplication() {
 		if (const auto window = App::wnd()) {
 			if (const auto controller = window->sessionController()) {
 				controller->showSection(
-					Info::Memento(
-						Info::Settings::Tag{ Auth().user() },
+					std::make_shared<Info::Memento>(
+						Info::Settings::Tag{ controller->session().user() },
 						Info::Section::SettingsType::Advanced),
 					Window::SectionShow());
 			} else {
 				window->showSpecialLayer(
-					Box<::Settings::LayerWidget>(),
+					Box<::Settings::LayerWidget>(&window->controller()),
 					anim::type::normal);
 			}
 			window->showFromTray();

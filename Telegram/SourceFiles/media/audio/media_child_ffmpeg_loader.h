@@ -22,7 +22,7 @@ struct ExternalSoundData {
 
 struct ExternalSoundPart {
 	AudioMsgId audio;
-	FFmpeg::Packet packet;
+	gsl::span<FFmpeg::Packet> packets;
 };
 
 class ChildFFMpegLoader : public AbstractAudioFFMpegLoader {
@@ -31,7 +31,7 @@ public:
 
 	bool open(crl::time positionMs) override;
 
-	bool check(const FileLocation &file, const QByteArray &data) override {
+	bool check(const Core::FileLocation &file, const QByteArray &data) override {
 		return true;
 	}
 

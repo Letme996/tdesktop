@@ -7,20 +7,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_user.h"
 
-#include "observer_peer.h"
 #include "storage/localstorage.h"
+#include "main/main_session.h"
 #include "data/data_session.h"
-#include "ui/text_options.h"
+#include "data/data_changes.h"
+#include "ui/text/text_options.h"
 #include "apiwrap.h"
 #include "lang/lang_keys.h"
-#include "facades.h"
 
 namespace {
 
 // User with hidden last seen stays online in UI for such amount of seconds.
 constexpr auto kSetOnlineAfterActivity = TimeId(30);
 
-using UpdateFlag = Notify::PeerUpdate::Flag;
+using UpdateFlag = Data::PeerUpdate::Flag;
 
 } // namespace
 
@@ -65,39 +65,41 @@ void UserData::setIsContact(bool is) {
 		: ContactStatus::NotContact;
 	if (_contactStatus != status) {
 		_contactStatus = status;
-		Notify::peerUpdatedDelayed(
-			this,
-			Notify::PeerUpdate::Flag::UserIsContact);
+		session().changes().peerUpdated(this, UpdateFlag::IsContact);
 	}
 }
 
-// see Local::readPeer as well
+// see Serialize::readPeer as well
 void UserData::setPhoto(const MTPUserProfilePhoto &photo) {
-	if (photo.type() == mtpc_userProfilePhoto) {
-		const auto &data = photo.c_userProfilePhoto();
-		updateUserpic(data.vphoto_id().v, data.vdc_id().v, data.vphoto_small());
-	} else {
+	photo.match([&](const MTPDuserProfilePhoto &data) {
+		updateUserpic(
+			data.vphoto_id().v,
+			data.vdc_id().v,
+			data.vphoto_small());
+	}, [&](const MTPDuserProfilePhotoEmpty &) {
 		clearUserpic();
-	}
+	});
 }
 
-QString UserData::unavailableReason() const {
-	return _unavailableReason;
+auto UserData::unavailableReasons() const
+-> const std::vector<Data::UnavailableReason> & {
+	return _unavailableReasons;
 }
 
-void UserData::setUnavailableReason(const QString &text) {
-	if (_unavailableReason != text) {
-		_unavailableReason = text;
-		Notify::peerUpdatedDelayed(
+void UserData::setUnavailableReasons(
+		std::vector<Data::UnavailableReason> &&reasons) {
+	if (_unavailableReasons != reasons) {
+		_unavailableReasons = std::move(reasons);
+		session().changes().peerUpdated(
 			this,
-			Notify::PeerUpdate::Flag::UnavailableReasonChanged);
+			UpdateFlag::UnavailableReason);
 	}
 }
 
 void UserData::setCommonChatsCount(int count) {
 	if (_commonChatsCount != count) {
 		_commonChatsCount = count;
-		Notify::peerUpdatedDelayed(this, UpdateFlag::UserCommonChatsChanged);
+		session().changes().peerUpdated(this, UpdateFlag::CommonChats);
 	}
 }
 
@@ -127,22 +129,15 @@ void UserData::setPhone(const QString &newPhone) {
 
 void UserData::setBotInfoVersion(int version) {
 	if (version < 0) {
-		if (botInfo) {
-			if (!botInfo->commands.isEmpty()) {
-				botInfo->commands.clear();
-				Notify::botCommandsChanged(this);
-			}
-			botInfo = nullptr;
-			Notify::userIsBotChanged(this);
-		}
+		// We don't support bots becoming non-bots.
 	} else if (!botInfo) {
 		botInfo = std::make_unique<BotInfo>();
 		botInfo->version = version;
-		Notify::userIsBotChanged(this);
+		owner().userIsBotChanged(this);
 	} else if (botInfo->version < version) {
 		if (!botInfo->commands.isEmpty()) {
 			botInfo->commands.clear();
-			Notify::botCommandsChanged(this);
+			owner().botCommandsChanged(this);
 		}
 		botInfo->description.clear();
 		botInfo->version = version;
@@ -195,7 +190,7 @@ void UserData::setBotInfo(const MTPBotInfo &info) {
 		botInfo->inited = true;
 
 		if (changedCommands) {
-			Notify::botCommandsChanged(this);
+			owner().botCommandsChanged(this);
 		}
 	} break;
 	}
@@ -216,10 +211,10 @@ void UserData::madeAction(TimeId when) {
 		return;
 	} else if (onlineTill <= 0 && -onlineTill < when) {
 		onlineTill = -when - kSetOnlineAfterActivity;
-		Notify::peerUpdatedDelayed(this, Notify::PeerUpdate::Flag::UserOnlineChanged);
+		session().changes().peerUpdated(this, UpdateFlag::OnlineStatus);
 	} else if (onlineTill > 0 && onlineTill < when + 1) {
 		onlineTill = when + kSetOnlineAfterActivity;
-		Notify::peerUpdatedDelayed(this, Notify::PeerUpdate::Flag::UserOnlineChanged);
+		session().changes().peerUpdated(this, UpdateFlag::OnlineStatus);
 	}
 }
 
@@ -233,25 +228,10 @@ void UserData::setAccessHash(uint64 accessHash) {
 	}
 }
 
-void UserData::setIsBlocked(bool is) {
-	const auto status = is
-		? BlockStatus::Blocked
-		: BlockStatus::NotBlocked;
-	if (_blockStatus != status) {
-		_blockStatus = status;
-		if (is) {
-			_fullFlags.add(MTPDuserFull::Flag::f_blocked);
-		} else {
-			_fullFlags.remove(MTPDuserFull::Flag::f_blocked);
-		}
-		Notify::peerUpdatedDelayed(this, UpdateFlag::UserIsBlocked);
-	}
-}
-
 void UserData::setCallsStatus(CallsStatus callsStatus) {
 	if (callsStatus != _callsStatus) {
 		_callsStatus = callsStatus;
-		Notify::peerUpdatedDelayed(this, UpdateFlag::UserHasCalls);
+		session().changes().peerUpdated(this, UpdateFlag::HasCalls);
 	}
 }
 
@@ -282,9 +262,7 @@ void ApplyUserUpdate(not_null<UserData*> user, const MTPDuserFull &update) {
 		user->setBotInfoVersion(-1);
 	}
 	if (const auto pinned = update.vpinned_msg_id()) {
-		user->setPinnedMessageId(pinned->v);
-	} else {
-		user->clearPinnedMessage();
+		SetTopPinnedMessageId(user, pinned->v);
 	}
 	user->setFullFlags(update.vflags().v);
 	user->setIsBlocked(update.is_blocked());

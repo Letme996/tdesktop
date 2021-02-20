@@ -7,8 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #pragma once
 
-#include "boxes/generic_box.h"
 #include "data/data_cloud_themes.h"
+#include "ui/layers/generic_box.h"
 #include "ui/widgets/checkbox.h"
 #include "base/unique_qptr.h"
 #include "base/binary_guard.h"
@@ -88,6 +88,7 @@ private:
 		Data::CloudTheme theme;
 		not_null<CloudListCheck*> check;
 		std::unique_ptr<Ui::Radiobutton> button;
+		std::shared_ptr<Data::DocumentMedia> media;
 		base::binary_guard generating;
 		bool waiting = false;
 
@@ -107,9 +108,7 @@ private:
 	void insert(int index, const Data::CloudTheme &theme);
 	void refreshColors(Element &element);
 	void showMenu(Element &element);
-	void refreshColorsFromDocument(
-		Element &element,
-		not_null<DocumentData*> document);
+	void refreshColorsFromDocument(Element &element);
 	void setWaiting(Element &element, bool waiting);
 	void subscribeToDownloadFinished();
 	int resizeGetHeight(int newWidth);

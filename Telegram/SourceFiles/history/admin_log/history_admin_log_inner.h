@@ -16,6 +16,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/sender.h"
 #include "base/timer.h"
 
+namespace Data {
+class CloudImageView;
+} // namespace Data
+
 namespace Main {
 class Session;
 } // namespace Main
@@ -44,7 +48,6 @@ class InnerWidget final
 	: public Ui::RpWidget
 	, public Ui::AbstractTooltipShower
 	, public HistoryView::ElementDelegate
-	, private MTP::Sender
 	, private base::Subscriber {
 public:
 	InnerWidget(
@@ -86,15 +89,15 @@ public:
 	// HistoryView::ElementDelegate interface.
 	HistoryView::Context elementContext() override;
 	std::unique_ptr<HistoryView::Element> elementCreate(
-		not_null<HistoryMessage*> message) override;
+		not_null<HistoryMessage*> message,
+		HistoryView::Element *replacing = nullptr) override;
 	std::unique_ptr<HistoryView::Element> elementCreate(
-		not_null<HistoryService*> message) override;
+		not_null<HistoryService*> message,
+		HistoryView::Element *replacing = nullptr) override;
 	bool elementUnderCursor(
 		not_null<const HistoryView::Element*> view) override;
-	void elementAnimationAutoplayAsync(
-		not_null<const HistoryView::Element*> view) override;
 	crl::time elementHighlightTime(
-		not_null<const HistoryView::Element*> element) override;
+		not_null<const HistoryItem*> item) override;
 	bool elementInSelectionMode() override;
 	bool elementIntersectsRange(
 		not_null<const HistoryView::Element*> view,
@@ -102,6 +105,21 @@ public:
 		int till) override;
 	void elementStartStickerLoop(
 		not_null<const HistoryView::Element*> view) override;
+	void elementShowPollResults(
+		not_null<PollData*> poll,
+		FullMsgId context) override;
+	void elementShowTooltip(
+		const TextWithEntities &text,
+		Fn<void()> hiddenCallback) override;
+	bool elementIsGifPaused() override;
+	bool elementHideReply(
+		not_null<const HistoryView::Element*> view) override;
+	bool elementShownUnread(
+		not_null<const HistoryView::Element*> view) override;
+	void elementSendBotCommand(
+		const QString &command,
+		const FullMsgId &context) override;
+	void elementHandleViaClick(not_null<UserData*> bot) override;
 
 	~InnerWidget();
 
@@ -157,9 +175,9 @@ private:
 	QPoint mapPointToItem(QPoint point, const Element *view) const;
 
 	void showContextMenu(QContextMenuEvent *e, bool showFromTouch = false);
-	void savePhotoToFile(PhotoData *photo);
-	void saveDocumentToFile(DocumentData *document);
-	void copyContextImage(PhotoData *photo);
+	void savePhotoToFile(not_null<PhotoData*> photo);
+	void saveDocumentToFile(not_null<DocumentData*> document);
+	void copyContextImage(not_null<PhotoData*> photo);
 	void showStickerPackInfo(not_null<DocumentData*> document);
 	void cancelContextDownload(not_null<DocumentData*> document);
 	void showContextInFolder(not_null<DocumentData*> document);
@@ -216,13 +234,19 @@ private:
 	template <typename Method>
 	void enumerateDates(Method method);
 
-	not_null<Window::SessionController*> _controller;
-	not_null<ChannelData*> _channel;
-	not_null<History*> _history;
+	const not_null<Window::SessionController*> _controller;
+	const not_null<ChannelData*> _channel;
+	const not_null<History*> _history;
+	MTP::Sender _api;
+
 	std::vector<OwnedItem> _items;
 	std::set<uint64> _eventIds;
 	std::map<not_null<const HistoryItem*>, not_null<Element*>> _itemsByData;
+	base::flat_map<not_null<const HistoryItem*>, TimeId> _itemDates;
 	base::flat_set<FullMsgId> _animatedStickersPlayed;
+	base::flat_map<
+		not_null<PeerData*>,
+		std::shared_ptr<Data::CloudImageView>> _userpics, _userpicsCache;
 	int _itemsTop = 0;
 	int _itemsWidth = 0;
 	int _itemsHeight = 0;

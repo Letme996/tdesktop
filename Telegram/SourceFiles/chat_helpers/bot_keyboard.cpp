@@ -12,10 +12,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_user.h"
 #include "data/data_session.h"
 #include "main/main_session.h"
+#include "ui/cached_round_corners.h"
 #include "facades.h"
-#include "app.h"
 #include "styles/style_widgets.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 namespace {
 
@@ -69,14 +69,14 @@ void Style::repaint(not_null<const HistoryItem*> item) const {
 }
 
 int Style::buttonRadius() const {
-	return st::buttonRadius;
+	return st::roundRadiusSmall;
 }
 
 void Style::paintButtonBg(
 		Painter &p,
 		const QRect &rect,
 		float64 howMuchOver) const {
-	App::roundRect(p, rect, st::botKbBg, BotKeyboardCorners);
+	Ui::FillRoundRect(p, rect, st::botKbBg, Ui::BotKeyboardCorners);
 }
 
 void Style::paintButtonIcon(
@@ -98,7 +98,9 @@ int Style::minButtonWidth(HistoryMessageMarkupButton::Type type) const {
 
 } // namespace
 
-BotKeyboard::BotKeyboard(QWidget *parent) : TWidget(parent)
+BotKeyboard::BotKeyboard(not_null<Main::Session*> session, QWidget *parent)
+: TWidget(parent)
+, _session(session)
 , _st(&st::botKbButton) {
 	setGeometry(0, 0, _st->margin, st::botKbScroll.deltat);
 	_height = st::botKbScroll.deltat;
@@ -149,7 +151,7 @@ void BotKeyboard::leaveEventHook(QEvent *e) {
 }
 
 bool BotKeyboard::moderateKeyActivate(int key) {
-	if (const auto item = Auth().data().message(_wasForMsgId)) {
+	if (const auto item = _session->data().message(_wasForMsgId)) {
 		if (const auto markup = item->Get<HistoryMessageReplyMarkup>()) {
 			if (key >= Qt::Key_1 && key <= Qt::Key_9) {
 				const auto index = int(key - Qt::Key_1);
@@ -159,12 +161,14 @@ bool BotKeyboard::moderateKeyActivate(int key) {
 					App::activateBotCommand(item, 0, index);
 					return true;
 				}
-			} else if (key == Qt::Key_Q) {
-				if (const auto user = item->history()->peer->asUser()) {
-					if (user->isBot() && item->from() == user) {
+			} else if (const auto user = item->history()->peer->asUser()) {
+				if (user->isBot() && item->from() == user) {
+					if (key == Qt::Key_Q) {
 						App::sendBotCommand(user, user, qsl("/translate"));
-						return true;
+					} else if (key == Qt::Key_W) {
+						App::sendBotCommand(user, user, qsl("/eng"));
 					}
+					return true;
 				}
 			}
 		}
@@ -271,7 +275,7 @@ QPoint BotKeyboard::tooltipPos() const {
 }
 
 bool BotKeyboard::tooltipWindowActive() const {
-	return Ui::InFocusChain(window());
+	return Ui::AppInFocus() && Ui::InFocusChain(window());
 }
 
 QString BotKeyboard::tooltipText() const {

@@ -16,6 +16,11 @@ class HistoryBlock;
 class HistoryItem;
 class HistoryMessage;
 class HistoryService;
+struct HistoryMessageReply;
+
+namespace Window {
+class SessionController;
+} // namespace Window
 
 namespace HistoryView {
 
@@ -27,6 +32,8 @@ class Media;
 
 enum class Context : char {
 	History,
+	Replies,
+	Pinned,
 	//Feed, // #feed
 	AdminLog,
 	ContactPreview
@@ -37,40 +44,72 @@ class ElementDelegate {
 public:
 	virtual Context elementContext() = 0;
 	virtual std::unique_ptr<Element> elementCreate(
-		not_null<HistoryMessage*> message) = 0;
+		not_null<HistoryMessage*> message,
+		Element *replacing = nullptr) = 0;
 	virtual std::unique_ptr<Element> elementCreate(
-		not_null<HistoryService*> message) = 0;
+		not_null<HistoryService*> message,
+		Element *replacing = nullptr) = 0;
 	virtual bool elementUnderCursor(not_null<const Element*> view) = 0;
-	virtual void elementAnimationAutoplayAsync(
-		not_null<const Element*> element) = 0;
 	virtual crl::time elementHighlightTime(
-		not_null<const Element*> element) = 0;
+		not_null<const HistoryItem*> item) = 0;
 	virtual bool elementInSelectionMode() = 0;
 	virtual bool elementIntersectsRange(
 		not_null<const Element*> view,
 		int from,
 		int till) = 0;
 	virtual void elementStartStickerLoop(not_null<const Element*> view) = 0;
+	virtual void elementShowPollResults(
+		not_null<PollData*> poll,
+		FullMsgId context) = 0;
+	virtual void elementShowTooltip(
+		const TextWithEntities &text,
+		Fn<void()> hiddenCallback) = 0;
+	virtual bool elementIsGifPaused() = 0;
+	virtual bool elementHideReply(not_null<const Element*> view) = 0;
+	virtual bool elementShownUnread(not_null<const Element*> view) = 0;
+	virtual void elementSendBotCommand(
+		const QString &command,
+		const FullMsgId &context) = 0;
+	virtual void elementHandleViaClick(not_null<UserData*> bot) = 0;
 
 };
 
 class SimpleElementDelegate : public ElementDelegate {
 public:
+	explicit SimpleElementDelegate(
+		not_null<Window::SessionController*> controller);
+
 	std::unique_ptr<Element> elementCreate(
-		not_null<HistoryMessage*> message) override;
+		not_null<HistoryMessage*> message,
+		Element *replacing = nullptr) override;
 	std::unique_ptr<Element> elementCreate(
-		not_null<HistoryService*> message) override;
+		not_null<HistoryService*> message,
+		Element *replacing = nullptr) override;
 	bool elementUnderCursor(not_null<const Element*> view) override;
-	void elementAnimationAutoplayAsync(
-		not_null<const Element*> element) override;
 	crl::time elementHighlightTime(
-		not_null<const Element*> element) override;
+		not_null<const HistoryItem*> item) override;
 	bool elementInSelectionMode() override;
 	bool elementIntersectsRange(
 		not_null<const Element*> view,
 		int from,
 		int till) override;
 	void elementStartStickerLoop(not_null<const Element*> view) override;
+	void elementShowPollResults(
+		not_null<PollData*> poll,
+		FullMsgId context) override;
+	void elementShowTooltip(
+		const TextWithEntities &text,
+		Fn<void()> hiddenCallback) override;
+	bool elementIsGifPaused() override;
+	bool elementHideReply(not_null<const Element*> view) override;
+	bool elementShownUnread(not_null<const Element*> view) override;
+	void elementSendBotCommand(
+		const QString &command,
+		const FullMsgId &context) override;
+	void elementHandleViaClick(not_null<UserData*> bot) override;
+
+private:
+	const not_null<Window::SessionController*> _controller;
 
 };
 
@@ -87,36 +126,28 @@ TextSelection ShiftItemSelection(
 	TextSelection selection,
 	const Ui::Text::String &byText);
 
+QString DateTooltipText(not_null<Element*> view);
+
 // Any HistoryView::Element can have this Component for
 // displaying the unread messages bar above the message.
 struct UnreadBar : public RuntimeComponent<UnreadBar, Element> {
-	void init(int newCount);
+	void init(const QString &string);
 
 	static int height();
 	static int marginTop();
 
 	void paint(Painter &p, int y, int w) const;
 
-	static constexpr auto kCountUnknown = std::numeric_limits<int>::max();
-
 	QString text;
 	int width = 0;
-	int count = 0;
-
-	// If unread bar is freezed the new messages do not
-	// increment the counter displayed by this bar.
-	//
-	// It happens when we've opened the conversation and
-	// we've seen the bar and new messages are marked as read
-	// as soon as they are added to the chat history.
-	bool freezed = false;
+	rpl::lifetime lifetime;
 
 };
 
 // Any HistoryView::Element can have this Component for
 // displaying the day mark above the message.
 struct DateBadge : public RuntimeComponent<DateBadge, Element> {
-	void init(const QDateTime &date);
+	void init(const QString &date);
 
 	int height() const;
 	void paint(Painter &p, int y, int w) const;
@@ -133,7 +164,8 @@ class Element
 public:
 	Element(
 		not_null<ElementDelegate*> delegate,
-		not_null<HistoryItem*> data);
+		not_null<HistoryItem*> data,
+		Element *replacing);
 
 	enum class Flag : uchar {
 		NeedsResize        = 0x01,
@@ -163,6 +195,8 @@ public:
 	bool pendingResize() const;
 	bool isUnderCursor() const;
 
+	bool isLastAndSelfMessage() const;
+
 	bool isAttachedToPrevious() const;
 	bool isAttachedToNext() const;
 
@@ -186,13 +220,8 @@ public:
 
 	bool computeIsAttachToPrevious(not_null<Element*> previous);
 
-	void setUnreadBarCount(int count);
+	void createUnreadBar(rpl::producer<QString> text);
 	void destroyUnreadBar();
-
-	// marks the unread bar as freezed so that unread
-	// messages count will not change for this bar
-	// when the new messages arrive in this chat history
-	void setUnreadBarFreezed();
 
 	int displayedDateHeight() const;
 	bool displayDate() const;
@@ -244,9 +273,12 @@ public:
 	virtual bool hasOutLayout() const;
 	virtual bool drawBubble() const;
 	virtual bool hasBubble() const;
+	virtual int minWidthForMedia() const {
+		return 0;
+	}
 	virtual bool hasFastReply() const;
 	virtual bool displayFastReply() const;
-	virtual bool displayRightAction() const;
+	virtual std::optional<QSize> rightActionSize() const;
 	virtual void drawRightAction(
 		Painter &p,
 		int left,
@@ -256,8 +288,27 @@ public:
 	virtual bool displayEditedBadge() const;
 	virtual TimeId displayedEditDate() const;
 	virtual bool hasVisibleText() const;
+	virtual HistoryMessageReply *displayedReply() const;
+	virtual void applyGroupAdminChanges(
+		const base::flat_set<UserId> &changes) {
+	}
 
+	struct VerticalRepaintRange {
+		int top = 0;
+		int height = 0;
+	};
+	[[nodiscard]] virtual VerticalRepaintRange verticalRepaintRange() const;
+
+	virtual bool hasHeavyPart() const;
 	virtual void unloadHeavyPart();
+	void checkHeavyPart();
+
+	void paintCustomHighlight(
+		Painter &p,
+		int y,
+		int height,
+		not_null<const HistoryItem*> item) const;
+	float64 highlightOpacity(not_null<const HistoryItem*> item) const;
 
 	// Legacy blocks structure.
 	HistoryBlock *block();
@@ -268,9 +319,15 @@ public:
 	void setIndexInBlock(int index);
 	int indexInBlock() const;
 	Element *previousInBlocks() const;
+	Element *previousDisplayedInBlocks() const;
 	Element *nextInBlocks() const;
+	Element *nextDisplayedInBlocks() const;
 	void previousInBlocksChanged();
 	void nextInBlocksRemoved();
+
+	[[nodiscard]] ClickHandlerPtr fromPhotoLink() const {
+		return fromLink();
+	}
 
 	virtual ~Element();
 
@@ -278,6 +335,8 @@ protected:
 	void paintHighlight(
 		Painter &p,
 		int geometryHeight) const;
+
+	[[nodiscard]] ClickHandlerPtr fromLink() const;
 
 	virtual void refreshDataIdHook();
 
@@ -299,11 +358,12 @@ private:
 	virtual QSize performCountOptimalSize() = 0;
 	virtual QSize performCountCurrentSize(int newWidth) = 0;
 
-	void refreshMedia();
+	void refreshMedia(Element *replacing);
 
 	const not_null<ElementDelegate*> _delegate;
 	const not_null<HistoryItem*> _data;
 	std::unique_ptr<Media> _media;
+	bool _isScheduledUntilOnline = false;
 	const QDateTime _dateTime;
 
 	int _y = 0;

@@ -8,11 +8,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 class History;
+class PhotoData;
 class DocumentData;
+struct FileLoadResult;
 
 namespace Api {
 
 struct MessageToSend;
+struct SendAction;
 
 void SendExistingDocument(
 	Api::MessageToSend &&message,
@@ -21,5 +24,17 @@ void SendExistingDocument(
 void SendExistingPhoto(
 	Api::MessageToSend &&message,
 	not_null<PhotoData*> photo);
+
+bool SendDice(Api::MessageToSend &message);
+
+void FillMessagePostFlags(
+	const SendAction &action,
+	not_null<PeerData*> peer,
+	MTPDmessage::Flags &flags);
+
+void SendConfirmedFile(
+	not_null<Main::Session*> session,
+	const std::shared_ptr<FileLoadResult> &file,
+	const std::optional<FullMsgId> &oldId);
 
 } // namespace Api

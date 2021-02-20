@@ -24,6 +24,11 @@ enum class SharedMediaType : signed char;
 using SharedMediaTypesMask = base::enum_mask<SharedMediaType>;
 } // namespace Storage
 
+namespace Lottie {
+class SinglePlayer;
+struct ColorReplacements;
+} // namespace Lottie
+
 namespace HistoryView {
 
 enum class PointState : char;
@@ -40,9 +45,22 @@ enum class MediaInBubbleState {
 	Bottom,
 };
 
+struct BubbleSelectionInterval {
+	int top = 0;
+	int height = 0;
+};
+
+[[nodiscard]] QString DocumentTimestampLinkBase(
+	not_null<DocumentData*> document,
+	FullMsgId context);
+[[nodiscard]] TextWithEntities AddTimestampLinks(
+	TextWithEntities text,
+	TimeId duration,
+	const QString &base);
+
 class Media : public Object {
 public:
-	Media(not_null<Element*> parent) : _parent(parent) {
+	explicit Media(not_null<Element*> parent) : _parent(parent) {
 	}
 
 	[[nodiscard]] not_null<History*> history() const;
@@ -65,6 +83,8 @@ public:
 		return false;
 	}
 	virtual void refreshParentId(not_null<HistoryItem*> realParent) {
+	}
+	virtual void drawHighlight(Painter &p, int top) const {
 	}
 	virtual void draw(
 		Painter &p,
@@ -103,6 +123,12 @@ public:
 	[[nodiscard]] TextSelection unskipSelection(
 		TextSelection selection) const;
 
+	[[nodiscard]] virtual auto getBubbleSelectionIntervals(
+		TextSelection selection) const
+	-> std::vector<BubbleSelectionInterval> {
+		return {};
+	}
+
 	// if we press and drag this link should we drag the item
 	[[nodiscard]] virtual bool dragItemByHandler(
 		const ClickHandlerPtr &p) const = 0;
@@ -131,10 +157,18 @@ public:
 	}
 	virtual void stopAnimation() {
 	}
-	virtual void clearStickerLoopPlayed() {
+	virtual void stickerClearLoopPlayed() {
+	}
+	virtual std::unique_ptr<Lottie::SinglePlayer> stickerTakeLottie(
+		not_null<DocumentData*> data,
+		const Lottie::ColorReplacements *replacements);
+	virtual void checkAnimation() {
 	}
 
-	[[nodiscard]] virtual QSize sizeForGrouping() const {
+	[[nodiscard]] virtual QSize sizeForGroupingOptimal(int maxWidth) const {
+		Unexpected("Grouping method call.");
+	}
+	[[nodiscard]] virtual QSize sizeForGrouping(int width) const {
 		Unexpected("Grouping method call.");
 	}
 	virtual void drawGrouped(
@@ -143,13 +177,16 @@ public:
 			TextSelection selection,
 			crl::time ms,
 			const QRect &geometry,
+			RectParts sides,
 			RectParts corners,
+			float64 highlightOpacity,
 			not_null<uint64*> cacheKey,
 			not_null<QPixmap*> cache) const {
 		Unexpected("Grouping method call.");
 	}
 	[[nodiscard]] virtual TextState getStateGrouped(
 		const QRect &geometry,
+		RectParts sides,
 		QPoint point,
 		StateRequest request) const;
 
@@ -197,6 +234,7 @@ public:
 		return (_inBubbleState == MediaInBubbleState::Bottom)
 			|| (_inBubbleState == MediaInBubbleState::None);
 	}
+	[[nodiscard]] bool isRoundedInBubbleBottom() const;
 	[[nodiscard]] virtual bool skipBubbleTail() const {
 		return false;
 	}
@@ -220,6 +258,32 @@ public:
 		return true;
 	}
 
+	struct BubbleRoll {
+		float64 rotate = 0.;
+		float64 scale = 1.;
+
+		explicit operator bool() const {
+			return (rotate != 0.) || (scale != 1.);
+		}
+	};
+	[[nodiscard]] virtual BubbleRoll bubbleRoll() const {
+		return BubbleRoll();
+	}
+	[[nodiscard]] virtual QMargins bubbleRollRepaintMargins() const {
+		return QMargins();
+	}
+	virtual void paintBubbleFireworks(
+		Painter &p,
+		const QRect &bubble,
+		crl::time ms) const {
+	}
+	[[nodiscard]] virtual bool customHighlight() const {
+		return false;
+	}
+
+	virtual bool hasHeavyPart() const {
+		return false;
+	}
 	virtual void unloadHeavyPart() {
 	}
 
@@ -232,13 +296,16 @@ public:
 	virtual ~Media() = default;
 
 protected:
-	QSize countCurrentSize(int newWidth) override;
-	Ui::Text::String createCaption(not_null<HistoryItem*> item) const;
+	[[nodiscard]] QSize countCurrentSize(int newWidth) override;
+	[[nodiscard]] Ui::Text::String createCaption(
+		not_null<HistoryItem*> item,
+		TimeId timestampLinksDuration = 0,
+		const QString &timestampLinkBase = QString()) const;
 
 	virtual void playAnimation(bool autoplay) {
 	}
 
-	not_null<Element*> _parent;
+	const not_null<Element*> _parent;
 	MediaInBubbleState _inBubbleState = MediaInBubbleState::None;
 
 };

@@ -14,24 +14,31 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/confirm_box.h"
 #include "boxes/about_box.h"
 #include "ui/wrap/vertical_layout.h"
+#include "ui/wrap/slide_wrap.h"
 #include "ui/widgets/labels.h"
 #include "ui/widgets/discrete_sliders.h"
-#include "info/profile/info_profile_button.h"
+#include "ui/widgets/buttons.h"
 #include "info/profile/info_profile_cover.h"
 #include "data/data_user.h"
 #include "data/data_session.h"
 #include "data/data_cloud_themes.h"
+#include "data/data_chat_filters.h"
 #include "lang/lang_keys.h"
+#include "lang/lang_instance.h"
 #include "storage/localstorage.h"
 #include "main/main_session.h"
+#include "main/main_session_settings.h"
+#include "main/main_account.h"
+#include "main/main_app_config.h"
 #include "apiwrap.h"
+#include "api/api_sensitive_content.h"
+#include "api/api_global_privacy.h"
 #include "window/window_session_controller.h"
-#include "core/file_utilities.h"
+#include "core/click_handler_types.h"
+#include "base/call_delayed.h"
 #include "facades.h"
 #include "app.h"
 #include "styles/style_settings.h"
-
-#include <QtGui/QDesktopServices>
 
 namespace Settings {
 
@@ -42,10 +49,10 @@ void SetupLanguageButton(
 		container,
 		tr::lng_settings_language(),
 		rpl::single(
-			Lang::Current().id()
+			Lang::GetInstance().id()
 		) | rpl::then(
-			Lang::Current().idChanges()
-		) | rpl::map([] { return Lang::Current().nativeName(); }),
+			Lang::GetInstance().idChanges()
+		) | rpl::map([] { return Lang::GetInstance().nativeName(); }),
 		icon ? st::settingsSectionButton : st::settingsButton,
 		icon ? &st::settingsIconLanguage : nullptr);
 	const auto guard = Ui::CreateChild<base::binary_guard>(button.get());
@@ -100,6 +107,51 @@ void SetupSections(
 		tr::lng_settings_section_chat_settings(),
 		Type::Chat,
 		&st::settingsIconChat);
+
+	const auto preload = [=] {
+		controller->session().data().chatsFilters().requestSuggested();
+	};
+	const auto account = &controller->session().account();
+	const auto slided = container->add(
+		object_ptr<Ui::SlideWrap<Ui::SettingsButton>>(
+			container,
+			CreateButton(
+				container,
+				tr::lng_settings_section_filters(),
+				st::settingsSectionButton,
+				&st::settingsIconFolders)))->setDuration(0);
+	if (!controller->session().data().chatsFilters().list().empty()
+		|| controller->session().settings().dialogsFiltersEnabled()) {
+		slided->show(anim::type::instant);
+		preload();
+	} else {
+		const auto enabled = [=] {
+			const auto result = account->appConfig().get<bool>(
+				"dialog_filters_enabled",
+				false);
+			if (result) {
+				preload();
+			}
+			return result;
+		};
+		const auto preloadIfEnabled = [=](bool enabled) {
+			if (enabled) {
+				preload();
+			}
+		};
+		slided->toggleOn(
+			rpl::single(
+				rpl::empty_value()
+			) | rpl::then(
+				account->appConfig().refreshed()
+			) | rpl::map(
+				enabled
+			) | rpl::before_next(preloadIfEnabled));
+	}
+	slided->entity()->setClickedCallback([=] {
+		showOther(Type::Folders);
+	});
+
 	addSection(
 		tr::lng_settings_advanced(),
 		Type::Advanced,
@@ -160,10 +212,11 @@ void SetupInterfaceScale(
 		}
 		return (result == ScaleValues.size()) ? (result - 1) : result;
 	};
-	const auto inSetScale = Ui::CreateChild<bool>(container.get());
-	const auto setScale = std::make_shared<Fn<void(int)>>();
-	*setScale = [=](int scale) {
-		if (*inSetScale) return;
+	const auto inSetScale = container->lifetime().make_state<bool>();
+	const auto setScale = [=](int scale, const auto &repeatSetScale) -> void {
+		if (*inSetScale) {
+			return;
+		}
 		*inSetScale = true;
 		const auto guard = gsl::finally([=] { *inSetScale = false; });
 
@@ -176,10 +229,10 @@ void SetupInterfaceScale(
 				App::restart();
 			});
 			const auto cancelled = crl::guard(button, [=] {
-				App::CallDelayed(
+				base::call_delayed(
 					st::defaultSettingsSlider.duration,
 					button,
-					[=] { (*setScale)(cConfigScale()); });
+					[=] { repeatSetScale(cConfigScale(), repeatSetScale); });
 			});
 			Ui::show(Box<ConfirmBox>(
 				tr::lng_settings_need_restart(tr::now),
@@ -206,22 +259,24 @@ void SetupInterfaceScale(
 	slider->sectionActivated(
 	) | rpl::map([=](int section) {
 		return scaleByIndex(section);
+	}) | rpl::filter([=](int scale) {
+		return cEvalScale(scale) != cEvalScale(cConfigScale());
 	}) | rpl::start_with_next([=](int scale) {
-		(*setScale)((scale == cScreenScale())
-			? style::kScaleAuto
-			: scale);
+		setScale(
+			(scale == cScreenScale()) ? style::kScaleAuto : scale,
+			setScale);
 	}, slider->lifetime());
 
 	button->toggledValue(
 	) | rpl::map([](bool checked) {
 		return checked ? style::kScaleAuto : cEvalScale(cConfigScale());
 	}) | rpl::start_with_next([=](int scale) {
-		(*setScale)(scale);
+		setScale(scale, setScale);
 	}, button->lifetime());
 }
 
 void OpenFaq() {
-	QDesktopServices::openUrl(telegramFaqLink());
+	UrlClickHandler::Open(telegramFaqLink());
 }
 
 void SetupFaq(not_null<Ui::VerticalLayout*> container, bool icon) {
@@ -292,7 +347,9 @@ Main::Main(
 }
 
 void Main::keyPressEvent(QKeyEvent *e) {
-	CodesFeedString(&_controller->session(), e->text());
+	crl::on_main(this, [=, text = e->text()]{
+		CodesFeedString(_controller, text);
+	});
 	return Section::keyPressEvent(e);
 }
 
@@ -321,6 +378,8 @@ void Main::setupContent(not_null<Window::SessionController*> controller) {
 	// If we load this in advance it won't jump when we open its' section.
 	controller->session().api().reloadPasswordState();
 	controller->session().api().reloadContactSignupSilent();
+	controller->session().api().sensitiveContent().reload();
+	controller->session().api().globalPrivacy().reload();
 	controller->session().data().cloudThemes().refresh();
 }
 

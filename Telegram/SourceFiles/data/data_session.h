@@ -8,11 +8,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "storage/storage_databases.h"
-#include "chat_helpers/stickers.h"
 #include "dialogs/dialogs_key.h"
 #include "dialogs/dialogs_indexed_list.h"
 #include "dialogs/dialogs_main_list.h"
 #include "data/data_groups.h"
+#include "data/data_cloud_file.h"
 #include "data/data_notify_settings.h"
 #include "history/history_location_manager.h"
 #include "base/timer.h"
@@ -23,7 +23,6 @@ class Image;
 class HistoryItem;
 class HistoryMessage;
 class HistoryService;
-class BoxContent;
 struct WebPageCollage;
 enum class WebPageType;
 enum class NewMessageType;
@@ -32,27 +31,16 @@ namespace HistoryView {
 struct Group;
 class Element;
 class ElementDelegate;
+class SendActionPainter;
 } // namespace HistoryView
 
 namespace Main {
 class Session;
 } // namespace Main
 
-namespace Media {
-namespace Clip {
-class Reader;
-} // namespace Clip
-namespace Streaming {
-class Reader;
-} // namespace Streaming
-} // namespace Media
-
-namespace Export {
-class Controller;
-namespace View {
-class PanelController;
-} // namespace View
-} // namespace Export
+namespace Ui {
+class BoxContent;
+} // namespace Ui
 
 namespace Passport {
 struct SavedCredentials;
@@ -64,7 +52,15 @@ class Folder;
 class LocationPoint;
 class WallPaper;
 class ScheduledMessages;
+class ChatFilters;
 class CloudThemes;
+class Streaming;
+class MediaRotation;
+class Histories;
+class DocumentMedia;
+class PhotoMedia;
+class Stickers;
+class GroupCall;
 
 class Session final {
 public:
@@ -88,11 +84,26 @@ public:
 	[[nodiscard]] const Groups &groups() const {
 		return _groups;
 	}
+	[[nodiscard]] ChatFilters &chatsFilters() const {
+		return *_chatsFilters;
+	}
 	[[nodiscard]] ScheduledMessages &scheduledMessages() const {
 		return *_scheduledMessages;
 	}
 	[[nodiscard]] CloudThemes &cloudThemes() const {
 		return *_cloudThemes;
+	}
+	[[nodiscard]] Streaming &streaming() const {
+		return *_streaming;
+	}
+	[[nodiscard]] MediaRotation &mediaRotation() const {
+		return *_mediaRotation;
+	}
+	[[nodiscard]] Histories &histories() const {
+		return *_histories;
+	}
+	[[nodiscard]] Stickers &stickers() const {
+		return *_stickers;
 	}
 	[[nodiscard]] MsgId nextNonHistoryEntryId() {
 		return ++_nonHistoryEntryId;
@@ -100,15 +111,11 @@ public:
 
 	void clear();
 
-	void startExport(PeerData *peer = nullptr);
-	void startExport(const MTPInputPeer &singlePeer);
+	void keepAlive(std::shared_ptr<PhotoMedia> media);
+	void keepAlive(std::shared_ptr<DocumentMedia> media);
+
 	void suggestStartExport(TimeId availableAt);
 	void clearExportSuggestion();
-	[[nodiscard]] auto currentExportView() const
-	-> rpl::producer<Export::View::PanelController*>;
-	bool exportInProgress() const;
-	void stopExportWithConfirmation(FnMut<void()> callback);
-	void stopExport();
 
 	[[nodiscard]] auto passportCredentials() const
 	-> const Passport::SavedCredentials*;
@@ -147,6 +154,26 @@ public:
 
 	void applyMaximumChatVersions(const MTPVector<MTPChat> &data);
 
+	void registerGroupCall(not_null<GroupCall*> call);
+	void unregisterGroupCall(not_null<GroupCall*> call);
+	GroupCall *groupCall(uint64 callId) const;
+
+	[[nodiscard]] auto invitedToCallUsers(uint64 callId) const
+		-> const base::flat_set<not_null<UserData*>> &;
+	void registerInvitedToCallUser(
+		uint64 callId,
+		not_null<PeerData*> peer,
+		not_null<UserData*> user);
+	void unregisterInvitedToCallUser(uint64 callId, not_null<UserData*> user);
+
+	struct InviteToCall {
+		uint64 id = 0;
+		not_null<UserData*> user;
+	};
+	[[nodiscard]] rpl::producer<InviteToCall> invitesToCalls() const {
+		return _invitesToCalls.events();
+	}
+
 	void enumerateUsers(Fn<void(not_null<UserData*>)> action) const;
 	void enumerateGroups(Fn<void(not_null<PeerData*>)> action) const;
 	void enumerateChannels(Fn<void(not_null<ChannelData*>)> action) const;
@@ -161,8 +188,11 @@ public:
 
 	void deleteConversationLocally(not_null<PeerData*> peer);
 
+	void cancelForwarding(not_null<History*> history);
+
 	void registerSendAction(
 		not_null<History*> history,
+		MsgId rootId,
 		not_null<UserData*> user,
 		const MTPSendMessageAction &action,
 		TimeId when);
@@ -180,6 +210,11 @@ public:
 	void chatsListChanged(FolderId folderId);
 	void chatsListChanged(Data::Folder *folder);
 	void chatsListDone(Data::Folder *folder);
+
+	void userIsBotChanged(not_null<UserData*> user);
+	[[nodiscard]] rpl::producer<not_null<UserData*>> userIsBotChanges() const;
+	void botCommandsChanged(not_null<UserData*> user);
+	[[nodiscard]] rpl::producer<not_null<UserData*>> botCommandsChanges() const;
 
 	struct ItemVisibilityQuery {
 		not_null<HistoryItem*> item;
@@ -217,6 +252,8 @@ public:
 	[[nodiscard]] rpl::producer<not_null<const History*>> historyUnloaded() const;
 
 	[[nodiscard]] rpl::producer<not_null<const HistoryItem*>> itemRemoved() const;
+	[[nodiscard]] rpl::producer<not_null<const HistoryItem*>> itemRemoved(
+		FullMsgId itemId) const;
 	void notifyViewRemoved(not_null<const ViewElement*> view);
 	[[nodiscard]] rpl::producer<not_null<const ViewElement*>> viewRemoved() const;
 	void notifyHistoryCleared(not_null<const History*> history);
@@ -224,6 +261,9 @@ public:
 	void notifyHistoryChangeDelayed(not_null<History*> history);
 	[[nodiscard]] rpl::producer<not_null<History*>> historyChanged() const;
 	void sendHistoryChangeNotifications();
+
+	void notifyPinnedDialogsOrderUpdated();
+	[[nodiscard]] rpl::producer<> pinnedDialogsOrderUpdated() const;
 
 	void registerHeavyViewPart(not_null<ViewElement*> view);
 	void unregisterHeavyViewPart(not_null<ViewElement*> view);
@@ -250,91 +290,6 @@ public:
 	[[nodiscard]] rpl::producer<not_null<UserData*>> megagroupParticipantAdded(
 		not_null<ChannelData*> channel) const;
 
-	void notifyStickersUpdated();
-	[[nodiscard]] rpl::producer<> stickersUpdated() const;
-	void notifyRecentStickersUpdated();
-	[[nodiscard]] rpl::producer<> recentStickersUpdated() const;
-	void notifySavedGifsUpdated();
-	[[nodiscard]] rpl::producer<> savedGifsUpdated() const;
-	void notifyPinnedDialogsOrderUpdated();
-	[[nodiscard]] rpl::producer<> pinnedDialogsOrderUpdated() const;
-
-	bool stickersUpdateNeeded(crl::time now) const {
-		return stickersUpdateNeeded(_lastStickersUpdate, now);
-	}
-	void setLastStickersUpdate(crl::time update) {
-		_lastStickersUpdate = update;
-	}
-	bool recentStickersUpdateNeeded(crl::time now) const {
-		return stickersUpdateNeeded(_lastRecentStickersUpdate, now);
-	}
-	void setLastRecentStickersUpdate(crl::time update) {
-		if (update) {
-			notifyRecentStickersUpdated();
-		}
-		_lastRecentStickersUpdate = update;
-	}
-	bool favedStickersUpdateNeeded(crl::time now) const {
-		return stickersUpdateNeeded(_lastFavedStickersUpdate, now);
-	}
-	void setLastFavedStickersUpdate(crl::time update) {
-		_lastFavedStickersUpdate = update;
-	}
-	bool featuredStickersUpdateNeeded(crl::time now) const {
-		return stickersUpdateNeeded(_lastFeaturedStickersUpdate, now);
-	}
-	void setLastFeaturedStickersUpdate(crl::time update) {
-		_lastFeaturedStickersUpdate = update;
-	}
-	bool savedGifsUpdateNeeded(crl::time now) const {
-		return stickersUpdateNeeded(_lastSavedGifsUpdate, now);
-	}
-	void setLastSavedGifsUpdate(crl::time update) {
-		_lastSavedGifsUpdate = update;
-	}
-	int featuredStickerSetsUnreadCount() const {
-		return _featuredStickerSetsUnreadCount.current();
-	}
-	void setFeaturedStickerSetsUnreadCount(int count) {
-		_featuredStickerSetsUnreadCount = count;
-	}
-	[[nodiscard]] rpl::producer<int> featuredStickerSetsUnreadCountValue() const {
-		return _featuredStickerSetsUnreadCount.value();
-	}
-	const Stickers::Sets &stickerSets() const {
-		return _stickerSets;
-	}
-	Stickers::Sets &stickerSetsRef() {
-		return _stickerSets;
-	}
-	const Stickers::Order &stickerSetsOrder() const {
-		return _stickerSetsOrder;
-	}
-	Stickers::Order &stickerSetsOrderRef() {
-		return _stickerSetsOrder;
-	}
-	const Stickers::Order &featuredStickerSetsOrder() const {
-		return _featuredStickerSetsOrder;
-	}
-	Stickers::Order &featuredStickerSetsOrderRef() {
-		return _featuredStickerSetsOrder;
-	}
-	const Stickers::Order &archivedStickerSetsOrder() const {
-		return _archivedStickerSetsOrder;
-	}
-	Stickers::Order &archivedStickerSetsOrderRef() {
-		return _archivedStickerSetsOrder;
-	}
-	const Stickers::SavedGifs &savedGifs() const {
-		return _savedGifs;
-	}
-	Stickers::SavedGifs &savedGifsRef() {
-		return _savedGifs;
-	}
-
-	void addSavedGif(not_null<DocumentData*> document);
-	void checkSavedGif(not_null<HistoryItem*> item);
-
 	HistoryItemsList idsToItems(const MessageIdsList &ids) const;
 	MessageIdsList itemsToIds(const HistoryItemsList &items) const;
 	MessageIdsList itemOrItsGroup(not_null<HistoryItem*> item) const;
@@ -352,35 +307,26 @@ public:
 		const QVector<MTPDialog> &dialogs,
 		std::optional<int> count = std::nullopt);
 
-	int pinnedChatsCount(Data::Folder *folder) const;
-	int pinnedChatsLimit(Data::Folder *folder) const;
+	int pinnedChatsCount(Data::Folder *folder, FilterId filterId) const;
+	int pinnedChatsLimit(Data::Folder *folder, FilterId filterId) const;
 	const std::vector<Dialogs::Key> &pinnedChatsOrder(
-		Data::Folder *folder) const;
-	void setChatPinned(const Dialogs::Key &key, bool pinned);
+		Data::Folder *folder,
+		FilterId filterId) const;
+	void setChatPinned(
+		const Dialogs::Key &key,
+		FilterId filterId,
+		bool pinned);
 	void clearPinnedChats(Data::Folder *folder);
 	void applyPinnedChats(
 		Data::Folder *folder,
 		const QVector<MTPDialogPeer> &list);
 	void reorderTwoPinnedChats(
+		FilterId filterId,
 		const Dialogs::Key &key1,
 		const Dialogs::Key &key2);
 
-	template <typename ...Args>
-	not_null<HistoryMessage*> makeMessage(Args &&...args) {
-		return static_cast<HistoryMessage*>(
-			registerMessage(
-				std::make_unique<HistoryMessage>(
-					std::forward<Args>(args)...)));
-	}
-
-	template <typename ...Args>
-	not_null<HistoryService*> makeServiceMessage(Args &&...args) {
-		return static_cast<HistoryService*>(
-			registerMessage(
-				std::make_unique<HistoryService>(
-					std::forward<Args>(args)...)));
-	}
-	void destroyMessage(not_null<HistoryItem*> item);
+	void registerMessage(not_null<HistoryItem*> item);
+	void unregisterMessage(not_null<HistoryItem*> item);
 
 	// Returns true if item found and it is not detached.
 	bool checkEntitiesAndViewsUpdate(const MTPDmessage &data);
@@ -412,6 +358,8 @@ public:
 		not_null<HistoryItem*> dependent,
 		not_null<HistoryItem*> dependency);
 
+	void destroyAllCallItems();
+
 	void registerMessageRandomId(uint64 randomId, FullMsgId itemId);
 	void unregisterMessageRandomId(uint64 randomId);
 	[[nodiscard]] FullMsgId messageIdByRandomId(uint64 randomId) const;
@@ -426,16 +374,20 @@ public:
 	void documentLoadSettingsChanged();
 
 	void notifyPhotoLayoutChanged(not_null<const PhotoData*> photo);
+	void requestPhotoViewRepaint(not_null<const PhotoData*> photo);
 	void notifyDocumentLayoutChanged(
 		not_null<const DocumentData*> document);
 	void requestDocumentViewRepaint(not_null<const DocumentData*> document);
 	void markMediaRead(not_null<const DocumentData*> document);
 	void requestPollViewRepaint(not_null<const PollData*> poll);
 
-	std::shared_ptr<::Media::Streaming::Reader> documentStreamedReader(
-		not_null<DocumentData*> document,
-		FileOrigin origin,
-		bool forceRemoteLoader = false);
+	void photoLoadProgress(not_null<PhotoData*> photo);
+	void photoLoadDone(not_null<PhotoData*> photo);
+	void photoLoadFail(not_null<PhotoData*> photo, bool started);
+
+	void documentLoadProgress(not_null<DocumentData*> document);
+	void documentLoadDone(not_null<DocumentData*> document);
+	void documentLoadFail(not_null<DocumentData*> document, bool started);
 
 	HistoryItem *addNewMessage(
 		const MTPMessage &data,
@@ -451,17 +403,28 @@ public:
 	[[nodiscard]] auto sendActionAnimationUpdated() const
 		-> rpl::producer<SendActionAnimationUpdate>;
 	void updateSendActionAnimation(SendActionAnimationUpdate &&update);
+	[[nodiscard]] auto speakingAnimationUpdated() const
+		-> rpl::producer<not_null<History*>>;
+	void updateSpeakingAnimation(not_null<History*> history);
 
-	int unreadBadge() const;
-	bool unreadBadgeMuted() const;
-	int unreadBadgeIgnoreOne(const Dialogs::Key &key) const;
-	bool unreadBadgeMutedIgnoreOne(const Dialogs::Key &key) const;
-	int unreadOnlyMutedBadge() const;
+	using SendActionPainter = HistoryView::SendActionPainter;
+	[[nodiscard]] std::shared_ptr<SendActionPainter> repliesSendActionPainter(
+		not_null<History*> history,
+		MsgId rootId);
+	void repliesSendActionPainterRemoved(
+		not_null<History*> history,
+		MsgId rootId);
+	void repliesSendActionPaintersClear(
+		not_null<History*> history,
+		not_null<UserData*> user);
 
-	void unreadStateChanged(
-		const Dialogs::Key &key,
-		const Dialogs::UnreadState &wasState);
-	void unreadEntryChanged(const Dialogs::Key &key, bool added);
+	[[nodiscard]] int unreadBadge() const;
+	[[nodiscard]] bool unreadBadgeMuted() const;
+	[[nodiscard]] int unreadBadgeIgnoreOne(const Dialogs::Key &key) const;
+	[[nodiscard]] bool unreadBadgeMutedIgnoreOne(const Dialogs::Key &key) const;
+	[[nodiscard]] int unreadOnlyMutedBadge() const;
+	[[nodiscard]] rpl::producer<> unreadBadgeChanges() const;
+	void notifyUnreadBadgeChanged();
 
 	void selfDestructIn(not_null<HistoryItem*> item, crl::time delay);
 
@@ -477,25 +440,26 @@ public:
 		const QByteArray &fileReference,
 		TimeId date,
 		int32 dc,
-		bool hasSticker,
-		const ImagePtr &thumbnailInline,
-		const ImagePtr &thumbnailSmall,
-		const ImagePtr &thumbnail,
-		const ImagePtr &large);
+		bool hasStickers,
+		const QByteArray &inlineThumbnailBytes,
+		const ImageWithLocation &small,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &large,
+		const ImageWithLocation &video,
+		crl::time videoStartTime);
 	void photoConvert(
 		not_null<PhotoData*> original,
 		const MTPPhoto &data);
 	[[nodiscard]] PhotoData *photoFromWeb(
 		const MTPWebDocument &data,
-		ImagePtr thumbnail = ImagePtr(),
-		bool willBecomeNormal = false);
+		const ImageLocation &thumbnailLocation);
 
 	[[nodiscard]] not_null<DocumentData*> document(DocumentId id);
 	not_null<DocumentData*> processDocument(const MTPDocument &data);
 	not_null<DocumentData*> processDocument(const MTPDdocument &data);
 	not_null<DocumentData*> processDocument(
 		const MTPdocument &data,
-		QImage &&thumb);
+		const ImageWithLocation &thumbnail);
 	[[nodiscard]] not_null<DocumentData*> document(
 		DocumentId id,
 		const uint64 &access,
@@ -503,17 +467,18 @@ public:
 		TimeId date,
 		const QVector<MTPDocumentAttribute> &attributes,
 		const QString &mime,
-		const ImagePtr &thumbnailInline,
-		const ImagePtr &thumbnail,
+		const QByteArray &inlineThumbnailBytes,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &videoThumbnail,
 		int32 dc,
-		int32 size,
-		const StorageImageLocation &thumbLocation);
+		int32 size);
 	void documentConvert(
 		not_null<DocumentData*> original,
 		const MTPDocument &data);
 	[[nodiscard]] DocumentData *documentFromWeb(
 		const MTPWebDocument &data,
-		ImagePtr thumb);
+		const ImageLocation &thumbnailLocation,
+		const ImageLocation &videoThumbnailLocation);
 
 	[[nodiscard]] not_null<WebPageData*> webpage(WebPageId id);
 	not_null<WebPageData*> processWebpage(const MTPWebPage &data);
@@ -556,7 +521,7 @@ public:
 	not_null<PollData*> processPoll(const MTPPoll &data);
 	not_null<PollData*> processPoll(const MTPDmessageMediaPoll &data);
 
-	[[nodiscard]] not_null<LocationThumbnail*> location(
+	[[nodiscard]] not_null<Data::CloudImage*> location(
 		const LocationPoint &point);
 
 	void registerPhotoItem(
@@ -607,11 +572,12 @@ public:
 	void unregisterContactItem(
 		UserId contactId,
 		not_null<HistoryItem*> item);
-	void registerAutoplayAnimation(
-		not_null<::Media::Clip::Reader*> reader,
-		not_null<ViewElement*> view);
-	void unregisterAutoplayAnimation(
-		not_null<::Media::Clip::Reader*> reader);
+	void registerCallItem(not_null<HistoryItem*> item);
+	void unregisterCallItem(not_null<HistoryItem*> item);
+
+	void documentMessageRemoved(not_null<DocumentData*> document);
+
+	void checkPlayingAnimations();
 
 	HistoryItem *findWebPageItem(not_null<WebPageData*> page) const;
 	QString findContactPhone(not_null<UserData*> contact) const;
@@ -620,10 +586,12 @@ public:
 	void notifyWebPageUpdateDelayed(not_null<WebPageData*> page);
 	void notifyGameUpdateDelayed(not_null<GameData*> game);
 	void notifyPollUpdateDelayed(not_null<PollData*> poll);
-	bool hasPendingWebPageGamePollNotification() const;
+	[[nodiscard]] bool hasPendingWebPageGamePollNotification() const;
 	void sendWebPageGamePollNotifications();
+	[[nodiscard]] rpl::producer<not_null<WebPageData*>> webPageUpdates() const;
 
-	void stopAutoplayAnimations();
+	void channelDifferenceTooLong(not_null<ChannelData*> channel);
+	[[nodiscard]] rpl::producer<not_null<ChannelData*>> channelDifferenceTooLong() const;
 
 	void registerItemView(not_null<ViewElement*> view);
 	void unregisterItemView(not_null<ViewElement*> view);
@@ -636,20 +604,27 @@ public:
 	//FeedId defaultFeedId() const;
 	//rpl::producer<FeedId> defaultFeedIdValue() const;
 
-	not_null<Dialogs::MainList*> chatsList(Data::Folder *folder = nullptr);
-	not_null<const Dialogs::MainList*> chatsList(
+	[[nodiscard]] not_null<Dialogs::MainList*> chatsList(
+		Data::Folder *folder = nullptr);
+	[[nodiscard]] not_null<const Dialogs::MainList*> chatsList(
 		Data::Folder *folder = nullptr) const;
-	not_null<Dialogs::IndexedList*> contactsList();
-	not_null<Dialogs::IndexedList*> contactsNoChatsList();
+	[[nodiscard]] not_null<Dialogs::IndexedList*> contactsList();
+	[[nodiscard]] not_null<Dialogs::IndexedList*> contactsNoChatsList();
 
-	struct RefreshChatListEntryResult {
-		bool changed = false;
-		bool importantChanged = false;
+	struct ChatListEntryRefresh {
+		Dialogs::Key key;
 		Dialogs::PositionChange moved;
-		Dialogs::PositionChange importantMoved;
+		FilterId filterId = 0;
+		bool existenceChanged = false;
+
+		explicit operator bool() const {
+			return existenceChanged || (moved.from != moved.to);
+		}
 	};
-	RefreshChatListEntryResult refreshChatListEntry(Dialogs::Key key);
+	void refreshChatListEntry(Dialogs::Key key);
 	void removeChatListEntry(Dialogs::Key key);
+	[[nodiscard]] auto chatListEntryRefreshes() const
+		-> rpl::producer<ChatListEntryRefresh>;
 
 	struct DialogsRowReplacement {
 		not_null<Dialogs::Row*> old;
@@ -666,6 +641,7 @@ public:
 		not_null<PeerData*> peer,
 		std::optional<int> muteForSeconds,
 		std::optional<bool> silentPosts = std::nullopt);
+	void resetNotifySettingsToDefault(not_null<PeerData*> peer);
 	bool notifyIsMuted(
 		not_null<const PeerData*> peer,
 		crl::time *changesIn = nullptr) const;
@@ -682,14 +658,14 @@ public:
 	void serviceNotification(
 		const TextWithEntities &message,
 		const MTPMessageMedia &media = MTP_messageMediaEmpty());
-	void checkNewAuthorization();
-	rpl::producer<> newAuthorizationChecks() const;
 
 	void setMimeForwardIds(MessageIdsList &&list);
 	MessageIdsList takeMimeForwardIds();
 
-	void setProxyPromoted(PeerData *promoted);
-	PeerData *proxyPromoted() const;
+	void setTopPromoted(
+		History *promoted,
+		const QString &type,
+		const QString &message);
 
 	bool updateWallpapers(const MTPaccount_WallPapers &data);
 	void removeWallpaper(const WallPaper &paper);
@@ -699,11 +675,11 @@ public:
 	void clearLocalStorage();
 
 private:
-	using Messages = std::unordered_map<MsgId, std::unique_ptr<HistoryItem>>;
+	using Messages = std::unordered_map<MsgId, not_null<HistoryItem*>>;
 
 	void suggestStartExport();
 
-	void setupContactViewsViewer();
+	void setupMigrationViewer();
 	void setupChannelLeavingViewer();
 	void setupPeerNameViewer();
 	void setupUserIsContactViewer();
@@ -720,7 +696,8 @@ private:
 
 	const Messages *messagesList(ChannelId channelId) const;
 	not_null<Messages*> messagesListForInsert(ChannelId channelId);
-	HistoryItem *registerMessage(std::unique_ptr<HistoryItem> item);
+	not_null<HistoryItem*> registerMessage(
+		std::unique_ptr<HistoryItem> item);
 	void changeMessageId(ChannelId channel, MsgId wasId, MsgId nowId);
 	void removeDependencyMessage(not_null<HistoryItem*> item);
 
@@ -736,11 +713,13 @@ private:
 		const QByteArray &fileReference,
 		TimeId date,
 		int32 dc,
-		bool hasSticker,
-		const ImagePtr &thumbnailInline,
-		const ImagePtr &thumbnailSmall,
-		const ImagePtr &thumbnail,
-		const ImagePtr &large);
+		bool hasStickers,
+		const QByteArray &inlineThumbnailBytes,
+		const ImageWithLocation &small,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &large,
+		const ImageWithLocation &video,
+		crl::time videoStartTime);
 
 	void documentApplyFields(
 		not_null<DocumentData*> document,
@@ -755,17 +734,19 @@ private:
 		TimeId date,
 		const QVector<MTPDocumentAttribute> &attributes,
 		const QString &mime,
-		const ImagePtr &thumbnailInline,
-		const ImagePtr &thumbnail,
+		const QByteArray &inlineThumbnailBytes,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &videoThumbnail,
 		int32 dc,
-		int32 size,
-		const StorageImageLocation &thumbLocation);
+		int32 size);
 	DocumentData *documentFromWeb(
 		const MTPDwebDocument &data,
-		ImagePtr thumb);
+		const ImageLocation &thumbnailLocation,
+		const ImageLocation &videoThumbnailLocation);
 	DocumentData *documentFromWeb(
 		const MTPDwebDocumentNoProxy &data,
-		ImagePtr thumb);
+		const ImageLocation &thumbnailLocation,
+		const ImageLocation &videoThumbnailLocation);
 
 	void webpageApplyFields(
 		not_null<WebPageData*> page,
@@ -801,13 +782,6 @@ private:
 		not_null<Folder*> folder,
 		const MTPDfolder &data);
 
-	bool stickersUpdateNeeded(crl::time lastUpdate, crl::time now) const {
-		constexpr auto kStickersUpdateTimeout = crl::time(3600'000);
-		return (lastUpdate == 0)
-			|| (now >= lastUpdate + kStickersUpdateTimeout);
-	}
-	void userIsContactUpdated(not_null<UserData*> user);
-
 	void setPinnedFromDialog(const Dialogs::Key &key, bool pinned);
 
 	NotifySettings &defaultNotifySettings(not_null<const PeerData*> peer);
@@ -828,23 +802,27 @@ private:
 		TimeId date);
 
 	bool sendActionsAnimationCallback(crl::time now);
+	[[nodiscard]] SendActionPainter *lookupSendActionPainter(
+		not_null<History*> history,
+		MsgId rootId);
 
 	void setWallpapers(const QVector<MTPWallPaper> &data, int32 hash);
 
-	not_null<Main::Session*> _session;
+	void checkPollsClosings();
+
+	const not_null<Main::Session*> _session;
 
 	Storage::DatabasePointer _cache;
 	Storage::DatabasePointer _bigFileCache;
 
-	std::unique_ptr<Export::Controller> _export;
-	std::unique_ptr<Export::View::PanelController> _exportPanel;
-	rpl::event_stream<Export::View::PanelController*> _exportViewChanges;
 	TimeId _exportAvailableAt = 0;
-	QPointer<BoxContent> _exportSuggestion;
+	QPointer<Ui::BoxContent> _exportSuggestion;
 
 	rpl::variable<bool> _contactsLoaded = false;
 	rpl::event_stream<Data::Folder*> _chatsListLoadedEvents;
 	rpl::event_stream<Data::Folder*> _chatsListChanged;
+	rpl::event_stream<not_null<UserData*>> _userIsBotChanges;
+	rpl::event_stream<not_null<UserData*>> _botCommandsChanges;
 	base::Observable<ItemVisibilityQuery> _queryItemVisibility;
 	rpl::event_stream<IdChange> _itemIdChanges;
 	rpl::event_stream<not_null<const HistoryItem*>> _itemLayoutChanges;
@@ -866,22 +844,8 @@ private:
 	rpl::event_stream<MegagroupParticipant> _megagroupParticipantRemoved;
 	rpl::event_stream<MegagroupParticipant> _megagroupParticipantAdded;
 	rpl::event_stream<DialogsRowReplacement> _dialogsRowReplacements;
-
-	rpl::event_stream<> _stickersUpdated;
-	rpl::event_stream<> _recentStickersUpdated;
-	rpl::event_stream<> _savedGifsUpdated;
-	rpl::event_stream<> _pinnedDialogsOrderUpdated;
-	crl::time _lastStickersUpdate = 0;
-	crl::time _lastRecentStickersUpdate = 0;
-	crl::time _lastFavedStickersUpdate = 0;
-	crl::time _lastFeaturedStickersUpdate = 0;
-	crl::time _lastSavedGifsUpdate = 0;
-	rpl::variable<int> _featuredStickerSetsUnreadCount = 0;
-	Stickers::Sets _stickerSets;
-	Stickers::Order _stickerSetsOrder;
-	Stickers::Order _featuredStickerSetsOrder;
-	Stickers::Order _archivedStickerSetsOrder;
-	Stickers::SavedGifs _savedGifs;
+	rpl::event_stream<ChatListEntryRefresh> _chatListEntryRefreshes;
+	rpl::event_stream<> _unreadBadgeChanges;
 
 	Dialogs::MainList _chatsList;
 	Dialogs::IndexedList _contactsList;
@@ -901,7 +865,9 @@ private:
 	std::vector<FullMsgId> _selfDestructItems;
 
 	// When typing in this history started.
-	base::flat_map<not_null<History*>, crl::time> _sendActions;
+	base::flat_map<
+		std::pair<not_null<History*>, MsgId>,
+		crl::time> _sendActions;
 	Ui::Animations::Basic _sendActionsAnimation;
 
 	std::unordered_map<
@@ -927,7 +893,7 @@ private:
 		base::flat_set<not_null<ViewElement*>>> _webpageViews;
 	std::unordered_map<
 		LocationPoint,
-		std::unique_ptr<LocationThumbnail>> _locations;
+		std::unique_ptr<Data::CloudImage>> _locations;
 	std::unordered_map<
 		PollId,
 		std::unique_ptr<PollData>> _polls;
@@ -946,17 +912,17 @@ private:
 	std::unordered_map<
 		UserId,
 		base::flat_set<not_null<ViewElement*>>> _contactViews;
-	base::flat_map<
-		not_null<::Media::Clip::Reader*>,
-		not_null<ViewElement*>> _autoplayAnimations;
+	std::unordered_set<not_null<HistoryItem*>> _callItems;
 
 	base::flat_set<not_null<WebPageData*>> _webpagesUpdated;
 	base::flat_set<not_null<GameData*>> _gamesUpdated;
 	base::flat_set<not_null<PollData*>> _pollsUpdated;
 
-	base::flat_map<
-		not_null<DocumentData*>,
-		std::weak_ptr<::Media::Streaming::Reader>> _streamedReaders;
+	rpl::event_stream<not_null<WebPageData*>> _webpageUpdates;
+	rpl::event_stream<not_null<ChannelData*>> _channelDifferenceTooLong;
+
+	base::flat_multi_map<TimeId, not_null<PollData*>> _pollsClosings;
+	base::Timer _pollsClosingTimer;
 
 	base::flat_map<FolderId, std::unique_ptr<Folder>> _folders;
 	//rpl::variable<FeedId> _defaultFeedId = FeedId(); // #feed
@@ -965,9 +931,15 @@ private:
 		not_null<const HistoryItem*>,
 		std::vector<not_null<ViewElement*>>> _views;
 
+	rpl::event_stream<> _pinnedDialogsOrderUpdated;
+
 	base::flat_set<not_null<ViewElement*>> _heavyViewParts;
 
-	PeerData *_proxyPromoted = nullptr;
+	base::flat_map<uint64, not_null<GroupCall*>> _groupCalls;
+	rpl::event_stream<InviteToCall> _invitesToCalls;
+	base::flat_map<uint64, base::flat_set<not_null<UserData*>>> _invitedToCallUsers;
+
+	History *_topPromoted = nullptr;
 
 	NotifySettings _defaultUserNotifySettings;
 	NotifySettings _defaultChatNotifySettings;
@@ -979,7 +951,6 @@ private:
 	base::Timer _unmuteByFinishedTimer;
 
 	std::unordered_map<PeerId, std::unique_ptr<PeerData>> _peers;
-	std::unordered_map<PeerId, std::unique_ptr<History>> _histories;
 
 	MessageIdsList _mimeForwardIds;
 
@@ -988,16 +959,25 @@ private:
 		int>;
 	std::unique_ptr<CredentialsWithGeneration> _passportCredentials;
 
-	rpl::event_stream<> _newAuthorizationChecks;
-
 	rpl::event_stream<SendActionAnimationUpdate> _sendActionAnimationUpdate;
+	rpl::event_stream<not_null<History*>> _speakingAnimationUpdate;
 
 	std::vector<WallPaper> _wallpapers;
 	int32 _wallpapersHash = 0;
 
 	Groups _groups;
+	std::unique_ptr<ChatFilters> _chatsFilters;
 	std::unique_ptr<ScheduledMessages> _scheduledMessages;
 	std::unique_ptr<CloudThemes> _cloudThemes;
+	std::unique_ptr<Streaming> _streaming;
+	std::unique_ptr<MediaRotation> _mediaRotation;
+	std::unique_ptr<Histories> _histories;
+	base::flat_map<
+		not_null<History*>,
+		base::flat_map<
+			MsgId,
+			std::weak_ptr<SendActionPainter>>> _sendActionPainters;
+	std::unique_ptr<Stickers> _stickers;
 	MsgId _nonHistoryEntryId = ServerMaxMsgId;
 
 	rpl::lifetime _lifetime;

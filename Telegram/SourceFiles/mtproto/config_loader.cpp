@@ -7,13 +7,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "mtproto/config_loader.h"
 
-#include "mtproto/dc_options.h"
-#include "mtproto/mtp_instance.h"
+#include "base/openssl_help.h"
 #include "mtproto/special_config_request.h"
+#include "mtproto/facade.h"
+#include "mtproto/mtproto_dc_options.h"
+#include "mtproto/mtproto_config.h"
+#include "mtproto/mtp_instance.h"
 #include "facades.h"
 
 namespace MTP {
-namespace internal {
+namespace details {
 namespace {
 
 constexpr auto kEnumerateDcTimeout = 8000; // 8 seconds timeout for help_getConfig to work (then move to other dc)
@@ -39,7 +42,7 @@ void ConfigLoader::load() {
 		sendRequest(_instance->mainDcId());
 		_enumDCTimer.callOnce(kEnumerateDcTimeout);
 	} else {
-		auto ids = _instance->dcOptions()->configEnumDcIds();
+		auto ids = _instance->dcOptions().configEnumDcIds();
 		Assert(!ids.empty());
 		_enumCurrent = ids.front();
 		enumerate();
@@ -86,7 +89,7 @@ void ConfigLoader::enumerate() {
 	if (!_enumCurrent) {
 		_enumCurrent = _instance->mainDcId();
 	}
-	auto ids = _instance->dcOptions()->configEnumDcIds();
+	auto ids = _instance->dcOptions().configEnumDcIds();
 	Assert(!ids.empty());
 
 	auto i = std::find(ids.cbegin(), ids.cend(), _enumCurrent);
@@ -134,7 +137,7 @@ void ConfigLoader::createSpecialLoader() {
 		} else {
 			addSpecialEndpoint(dcId, ip, port, secret);
 		}
-	}, _phone);
+	}, _instance->configValues().txtDomainString, _phone);
 }
 
 void ConfigLoader::addSpecialEndpoint(
@@ -172,14 +175,15 @@ void ConfigLoader::sendSpecialRequest() {
 	}
 
 	const auto weak = base::make_weak(this);
-	const auto index = rand_value<uint32>() % _specialEndpoints.size();
+	const auto index = openssl::RandomValue<uint32>()
+		% _specialEndpoints.size();
 	const auto endpoint = _specialEndpoints.begin() + index;
 	_specialEnumCurrent = specialToRealDcId(endpoint->dcId);
 
 	using Flag = MTPDdcOption::Flag;
 	const auto flags = Flag::f_tcpo_only
 		| (endpoint->secret.empty() ? Flag(0) : Flag::f_secret);
-	_instance->dcOptions()->constructAddOne(
+	_instance->dcOptions().constructAddOne(
 		_specialEnumCurrent,
 		flags,
 		endpoint->ip,
@@ -211,8 +215,8 @@ void ConfigLoader::specialConfigLoaded(const MTPConfig &result) {
 
 	// We use special config only for dc options.
 	// For everything else we wait for normal config from main dc.
-	_instance->dcOptions()->setFromList(data.vdc_options());
+	_instance->dcOptions().setFromList(data.vdc_options());
 }
 
-} // namespace internal
+} // namespace details
 } // namespace MTP

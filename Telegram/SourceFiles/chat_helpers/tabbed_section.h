@@ -44,17 +44,15 @@ public:
 		return true;
 	}
 	// Float player interface.
-	bool wheelEventFromFloatPlayer(QEvent *e) override;
-	QRect rectForFloatPlayer() const override;
+	bool floatPlayerHandleWheelEvent(QEvent *e) override;
+	QRect floatPlayerAvailableRect() override;
 
 	~TabbedSection();
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;
 
-	void showFinishedHook() override {
-		afterShown();
-	}
+	void showFinishedHook() override;
 
 private:
 	const not_null<TabbedSelector*> _selector;

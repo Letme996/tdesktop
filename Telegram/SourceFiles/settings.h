@@ -35,13 +35,12 @@ DeclareSetting(uint64, AlphaVersion);
 DeclareSetting(uint64, RealAlphaVersion);
 DeclareSetting(QByteArray, AlphaPrivateKey);
 
-DeclareSetting(bool, TestMode);
-DeclareSetting(QString, LoggedPhoneNumber);
 DeclareSetting(bool, AutoStart);
 DeclareSetting(bool, StartMinimized);
 DeclareSetting(bool, StartInTray);
 DeclareSetting(bool, SendToMenu);
 DeclareSetting(bool, UseExternalVideoPlayer);
+DeclareSetting(bool, UseFreeType);
 enum LaunchMode {
 	LaunchModeNormal = 0,
 	LaunchModeAutoStart,
@@ -69,18 +68,6 @@ inline const QString &cDialogHelperPathFinal() {
 
 DeclareSetting(bool, AutoUpdate);
 
-struct TWindowPos {
-	TWindowPos() = default;
-
-	int32 moncrc = 0;
-	int maximized = 0;
-	int x = 0;
-	int y = 0;
-	int w = 0;
-	int h = 0;
-};
-DeclareSetting(TWindowPos, WindowPos);
-DeclareSetting(bool, SupportTray);
 DeclareSetting(bool, SeenTrayTooltip);
 DeclareSetting(bool, RestartingUpdate);
 DeclareSetting(bool, Restarting);
@@ -89,6 +76,7 @@ DeclareSetting(bool, WriteProtected);
 DeclareSetting(int32, LastUpdateCheck);
 DeclareSetting(bool, NoStartUpdate);
 DeclareSetting(bool, StartToSettings);
+DeclareSetting(bool, DebugMode);
 DeclareReadSetting(bool, ManyInstance);
 
 DeclareSetting(QByteArray, LocalSalt);

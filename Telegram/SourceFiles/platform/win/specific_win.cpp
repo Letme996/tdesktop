@@ -11,6 +11,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "platform/win/notifications_manager_win.h"
 #include "platform/win/windows_app_user_model_id.h"
 #include "platform/win/windows_dlls.h"
+#include "base/platform/base_platform_info.h"
+#include "base/call_delayed.h"
 #include "lang/lang_keys.h"
 #include "mainwindow.h"
 #include "mainwidget.h"
@@ -18,9 +20,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/localstorage.h"
 #include "core/crash_reports.h"
 
+#include <QtCore/QOperatingSystemVersion>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QDesktopWidget>
 #include <QtGui/QDesktopServices>
+#include <QtGui/QWindow>
 #include <qpa/qplatformnativeinterface.h>
 
 #include <Shobjidl.h>
@@ -28,8 +32,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <roapi.h>
 #include <wrl/client.h>
-#include "platform/win/wrapper_wrl_implements_h.h"
-#include <windows.ui.notifications.h>
 
 #include <openssl/conf.h>
 #include <openssl/engine.h>
@@ -58,84 +60,50 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #endif
 
 #ifndef WM_NCPOINTERUPDATE
-#define WM_NCPOINTERUPDATE              0x0241
-#define WM_NCPOINTERDOWN                0x0242
-#define WM_NCPOINTERUP                  0x0243
+#define WM_NCPOINTERUPDATE 0x0241
+#define WM_NCPOINTERDOWN 0x0242
+#define WM_NCPOINTERUP 0x0243
 #endif
 
 using namespace Microsoft::WRL;
-using namespace ABI::Windows::UI::Notifications;
-using namespace ABI::Windows::Data::Xml::Dom;
-using namespace Windows::Foundation;
 using namespace Platform;
 
 namespace {
-    QStringList _initLogs;
 
-	bool themeInited = false;
-	bool finished = true;
-	QMargins simpleMargins, margins;
-	HICON bigIcon = 0, smallIcon = 0, overlayIcon = 0;
+bool themeInited = false;
+bool finished = true;
+QMargins simpleMargins, margins;
+HICON bigIcon = 0, smallIcon = 0, overlayIcon = 0;
 
-	class _PsInitializer {
-	public:
-		_PsInitializer() {
-			Dlls::start();
-		}
-	};
-	_PsInitializer _psInitializer;
-
+class _PsInitializer {
+public:
+	_PsInitializer() {
+		Dlls::start();
+	}
 };
+_PsInitializer _psInitializer;
 
-void psDeleteDir(const QString &dir) {
-	std::wstring wDir = QDir::toNativeSeparators(dir).toStdWString();
-	WCHAR path[4096];
-	memcpy(path, wDir.c_str(), (wDir.size() + 1) * sizeof(WCHAR));
-	path[wDir.size() + 1] = 0;
-	SHFILEOPSTRUCT file_op = {
-		NULL,
-		FO_DELETE,
-		path,
-		L"",
-		FOF_NOCONFIRMATION |
-		FOF_NOERRORUI |
-		FOF_SILENT,
-		false,
-		0,
-		L""
-	};
-	int res = SHFileOperation(&file_op);
-}
+BOOL CALLBACK _ActivateProcess(HWND hWnd, LPARAM lParam) {
+	uint64 &processId(*(uint64*)lParam);
 
-namespace {
-	BOOL CALLBACK _ActivateProcess(HWND hWnd, LPARAM lParam) {
-		uint64 &processId(*(uint64*)lParam);
+	DWORD dwProcessId;
+	::GetWindowThreadProcessId(hWnd, &dwProcessId);
 
-		DWORD dwProcessId;
-		::GetWindowThreadProcessId(hWnd, &dwProcessId);
-
-		if ((uint64)dwProcessId == processId) { // found top-level window
-			static const int32 nameBufSize = 1024;
-			WCHAR nameBuf[nameBufSize];
-			int32 len = GetWindowText(hWnd, nameBuf, nameBufSize);
-			if (len && len < nameBufSize) {
-				if (QRegularExpression(qsl("^Telegram(\\s*\\(\\d+\\))?$")).match(QString::fromStdWString(nameBuf)).hasMatch()) {
-					BOOL res = ::SetForegroundWindow(hWnd);
-					::SetFocus(hWnd);
-					return FALSE;
-				}
+	if ((uint64)dwProcessId == processId) { // found top-level window
+		static const int32 nameBufSize = 1024;
+		WCHAR nameBuf[nameBufSize];
+		int32 len = GetWindowText(hWnd, nameBuf, nameBufSize);
+		if (len && len < nameBufSize) {
+			if (QRegularExpression(qsl("^Telegram(\\s*\\(\\d+\\))?$")).match(QString::fromStdWString(nameBuf)).hasMatch()) {
+				BOOL res = ::SetForegroundWindow(hWnd);
+				::SetFocus(hWnd);
+				return FALSE;
 			}
 		}
-		return TRUE;
 	}
+	return TRUE;
 }
 
-QStringList psInitLogs() {
-    return _initLogs;
-}
-
-void psClearInitLogs() {
-    _initLogs = QStringList();
 }
 
 void psActivateProcess(uint64 pid) {
@@ -152,7 +120,7 @@ QString psAppDataPath() {
 #ifdef OS_WIN_STORE
 		return appData.absolutePath() + qsl("/Telegram Desktop UWP/");
 #else // OS_WIN_STORE
-		return appData.absolutePath() + '/' + str_const_toString(AppName) + '/';
+		return appData.absolutePath() + '/' + AppName.utf16() + '/';
 #endif // OS_WIN_STORE
 	}
 	return QString();
@@ -163,7 +131,7 @@ QString psAppDataPathOld() {
 	WCHAR wstrPath[maxFileLen];
 	if (GetEnvironmentVariable(L"APPDATA", wstrPath, maxFileLen)) {
 		QDir appData(QString::fromStdWString(std::wstring(wstrPath)));
-		return appData.absolutePath() + '/' + str_const_toString(AppNameOld) + '/';
+		return appData.absolutePath() + '/' + AppNameOld.utf16() + '/';
 	}
 	return QString();
 }
@@ -177,14 +145,9 @@ void psDoCleanup() {
 	}
 }
 
-namespace {
-
-QRect _monitorRect;
-crl::time _monitorLastGot = 0;
-
-} // namespace
-
 QRect psDesktopRect() {
+	static QRect _monitorRect;
+	static crl::time _monitorLastGot = 0;
 	auto tnow = crl::now();
 	if (tnow > _monitorLastGot + 1000LL || tnow < _monitorLastGot) {
 		_monitorLastGot = tnow;
@@ -216,24 +179,28 @@ int psCleanup() {
 void psDoFixPrevious() {
 	try {
 		static const int bufSize = 4096;
-		DWORD checkType, checkSize = bufSize * 2;
-		WCHAR checkStr[bufSize];
+		DWORD checkType = 0;
+		DWORD checkSize = bufSize * 2;
+		WCHAR checkStr[bufSize] = { 0 };
+		HKEY newKey1 = nullptr;
+		HKEY newKey2 = nullptr;
+		HKEY oldKey1 = nullptr;
+		HKEY oldKey2 = nullptr;
 
-		QString appId = str_const_toString(AppId);
-		QString newKeyStr1 = QString("Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%1_is1").arg(appId);
-		QString newKeyStr2 = QString("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%1_is1").arg(appId);
-		QString oldKeyStr1 = QString("SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%1_is1").arg(appId);
-		QString oldKeyStr2 = QString("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%1_is1").arg(appId);
-		HKEY newKey1, newKey2, oldKey1, oldKey2;
-		LSTATUS newKeyRes1 = RegOpenKeyEx(HKEY_CURRENT_USER, newKeyStr1.toStdWString().c_str(), 0, KEY_READ, &newKey1);
-		LSTATUS newKeyRes2 = RegOpenKeyEx(HKEY_CURRENT_USER, newKeyStr2.toStdWString().c_str(), 0, KEY_READ, &newKey2);
-		LSTATUS oldKeyRes1 = RegOpenKeyEx(HKEY_LOCAL_MACHINE, oldKeyStr1.toStdWString().c_str(), 0, KEY_READ, &oldKey1);
-		LSTATUS oldKeyRes2 = RegOpenKeyEx(HKEY_LOCAL_MACHINE, oldKeyStr2.toStdWString().c_str(), 0, KEY_READ, &oldKey2);
+		const auto appId = AppId.utf16();
+		const auto newKeyStr1 = QString("Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%1_is1").arg(appId).toStdWString();
+		const auto newKeyStr2 = QString("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%1_is1").arg(appId).toStdWString();
+		const auto oldKeyStr1 = QString("SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%1_is1").arg(appId).toStdWString();
+		const auto oldKeyStr2 = QString("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%1_is1").arg(appId).toStdWString();
+		const auto newKeyRes1 = RegOpenKeyEx(HKEY_CURRENT_USER, newKeyStr1.c_str(), 0, KEY_READ, &newKey1);
+		const auto newKeyRes2 = RegOpenKeyEx(HKEY_CURRENT_USER, newKeyStr2.c_str(), 0, KEY_READ, &newKey2);
+		const auto oldKeyRes1 = RegOpenKeyEx(HKEY_LOCAL_MACHINE, oldKeyStr1.c_str(), 0, KEY_READ, &oldKey1);
+		const auto oldKeyRes2 = RegOpenKeyEx(HKEY_LOCAL_MACHINE, oldKeyStr2.c_str(), 0, KEY_READ, &oldKey2);
 
-		bool existNew1 = (newKeyRes1 == ERROR_SUCCESS) && (RegQueryValueEx(newKey1, L"InstallDate", 0, &checkType, (BYTE*)checkStr, &checkSize) == ERROR_SUCCESS); checkSize = bufSize * 2;
-		bool existNew2 = (newKeyRes2 == ERROR_SUCCESS) && (RegQueryValueEx(newKey2, L"InstallDate", 0, &checkType, (BYTE*)checkStr, &checkSize) == ERROR_SUCCESS); checkSize = bufSize * 2;
-		bool existOld1 = (oldKeyRes1 == ERROR_SUCCESS) && (RegQueryValueEx(oldKey1, L"InstallDate", 0, &checkType, (BYTE*)checkStr, &checkSize) == ERROR_SUCCESS); checkSize = bufSize * 2;
-		bool existOld2 = (oldKeyRes2 == ERROR_SUCCESS) && (RegQueryValueEx(oldKey2, L"InstallDate", 0, &checkType, (BYTE*)checkStr, &checkSize) == ERROR_SUCCESS); checkSize = bufSize * 2;
+		const auto existNew1 = (newKeyRes1 == ERROR_SUCCESS) && (RegQueryValueEx(newKey1, L"InstallDate", 0, &checkType, (BYTE*)checkStr, &checkSize) == ERROR_SUCCESS); checkSize = bufSize * 2;
+		const auto existNew2 = (newKeyRes2 == ERROR_SUCCESS) && (RegQueryValueEx(newKey2, L"InstallDate", 0, &checkType, (BYTE*)checkStr, &checkSize) == ERROR_SUCCESS); checkSize = bufSize * 2;
+		const auto existOld1 = (oldKeyRes1 == ERROR_SUCCESS) && (RegQueryValueEx(oldKey1, L"InstallDate", 0, &checkType, (BYTE*)checkStr, &checkSize) == ERROR_SUCCESS); checkSize = bufSize * 2;
+		const auto existOld2 = (oldKeyRes2 == ERROR_SUCCESS) && (RegQueryValueEx(oldKey2, L"InstallDate", 0, &checkType, (BYTE*)checkStr, &checkSize) == ERROR_SUCCESS); checkSize = bufSize * 2;
 
 		if (newKeyRes1 == ERROR_SUCCESS) RegCloseKey(newKey1);
 		if (newKeyRes2 == ERROR_SUCCESS) RegCloseKey(newKey2);
@@ -241,8 +208,8 @@ void psDoFixPrevious() {
 		if (oldKeyRes2 == ERROR_SUCCESS) RegCloseKey(oldKey2);
 
 		if (existNew1 || existNew2) {
-			oldKeyRes1 = existOld1 ? RegDeleteKey(HKEY_LOCAL_MACHINE, oldKeyStr1.toStdWString().c_str()) : ERROR_SUCCESS;
-			oldKeyRes2 = existOld2 ? RegDeleteKey(HKEY_LOCAL_MACHINE, oldKeyStr2.toStdWString().c_str()) : ERROR_SUCCESS;
+			const auto deleteKeyRes1 = existOld1 ? RegDeleteKey(HKEY_LOCAL_MACHINE, oldKeyStr1.c_str()) : ERROR_SUCCESS;
+			const auto deleteKeyRes2 = existOld2 ? RegDeleteKey(HKEY_LOCAL_MACHINE, oldKeyStr2.c_str()) : ERROR_SUCCESS;
 		}
 
 		QString userDesktopLnk, commonDesktopLnk;
@@ -306,30 +273,43 @@ void SetApplicationIcon(const QIcon &icon) {
 	QApplication::setWindowIcon(icon);
 }
 
-QString CurrentExecutablePath(int argc, char *argv[]) {
-	WCHAR result[MAX_PATH + 1] = { 0 };
-	auto count = GetModuleFileName(nullptr, result, MAX_PATH + 1);
-	if (count < MAX_PATH + 1) {
-		auto info = QFileInfo(QDir::fromNativeSeparators(QString::fromWCharArray(result)));
-		return info.absoluteFilePath();
-	}
-
-	// Fallback to the first command line argument.
-	auto argsCount = 0;
-	if (auto args = CommandLineToArgvW(GetCommandLine(), &argsCount)) {
-		auto info = QFileInfo(QDir::fromNativeSeparators(QString::fromWCharArray(args[0])));
-		LocalFree(args);
-		return info.absoluteFilePath();
-	}
-	return QString();
+QString SingleInstanceLocalServerName(const QString &hash) {
+	return qsl("Global\\") + hash + '-' + cGUIDStr();
 }
 
-std::optional<crl::time> LastUserInputTime() {
-	auto lii = LASTINPUTINFO{ 0 };
-	lii.cbSize = sizeof(LASTINPUTINFO);
-	return GetLastInputInfo(&lii)
-		? std::make_optional(crl::now() + lii.dwTime - GetTickCount())
-		: std::nullopt;
+std::optional<bool> IsDarkMode() {
+	static const auto kSystemVersion = QOperatingSystemVersion::current();
+	static const auto kDarkModeAddedVersion = QOperatingSystemVersion(
+		QOperatingSystemVersion::Windows,
+		10,
+		0,
+		17763);
+	static const auto kSupported = (kSystemVersion >= kDarkModeAddedVersion);
+	if (!kSupported) {
+		return std::nullopt;
+	}
+
+	const auto keyName = L""
+		"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+	const auto valueName = L"AppsUseLightTheme";
+	auto key = HKEY();
+	auto result = RegOpenKeyEx(HKEY_CURRENT_USER, keyName, 0, KEY_READ, &key);
+	if (result != ERROR_SUCCESS) {
+		return std::nullopt;
+	}
+
+	DWORD value = 0, type = 0, size = sizeof(value);
+	result = RegQueryValueEx(key, valueName, 0, &type, (LPBYTE)&value, &size);
+	RegCloseKey(key);
+	if (result != ERROR_SUCCESS) {
+		return std::nullopt;
+	}
+
+	return (value == 0);
+}
+
+bool AutostartSupported() {
+	return !IsWindowsStoreBuild();
 }
 
 } // namespace Platform
@@ -381,7 +361,7 @@ namespace {
 		WCHAR defaultStr[bufSize] = { 0 };
 		if (RegQueryValueEx(rkey, value, 0, &defaultType, (BYTE*)defaultStr, &defaultSize) != ERROR_SUCCESS || defaultType != REG_SZ || defaultSize != (v.size() + 1) * 2 || QString::fromStdWString(defaultStr) != v) {
 			WCHAR tmp[bufSize] = { 0 };
-			if (!v.isEmpty()) wsprintf(tmp, v.replace(QChar('%'), qsl("%%")).toStdWString().c_str());
+			if (!v.isEmpty()) StringCbPrintf(tmp, bufSize, v.replace(QChar('%'), qsl("%%")).toStdWString().c_str());
 			LSTATUS status = RegSetValueEx(rkey, value, 0, REG_SZ, (BYTE*)tmp, (wcslen(tmp) + 1) * sizeof(WCHAR));
 			if (status != ERROR_SUCCESS) {
 				QString msg = qsl("App Error: could not set %1, error %2").arg(value ? ('\'' + QString::fromStdWString(value) + '\'') : qsl("(Default)")).arg("%1: %2");
@@ -395,11 +375,10 @@ namespace {
 
 namespace Platform {
 
-void RegisterCustomScheme() {
+void RegisterCustomScheme(bool force) {
 	if (cExeName().isEmpty()) {
 		return;
 	}
-#ifndef TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME
 	DEBUG_LOG(("App Info: Checking custom scheme 'tg'..."));
 
 	HKEY rkey;
@@ -437,7 +416,6 @@ void RegisterCustomScheme() {
 
 	if (!_psOpenRegKey(L"Software\\RegisteredApplications", &rkey)) return;
 	if (!_psSetKeyValue(rkey, L"Telegram Desktop", qsl("SOFTWARE\\TelegramDesktop\\Capabilities"))) return;
-#endif // !TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME
 }
 
 PermissionStatus GetPermissionStatus(PermissionType type) {
@@ -483,6 +461,7 @@ bool OpenSystemSettings(SystemSettingsType type) {
 	if (type == SystemSettingsType::Audio) {
 		crl::on_main([] {
 			WinExec("control.exe mmsys.cpl", SW_SHOW);
+			//QDesktopServices::openUrl(QUrl("ms-settings:sound"));
 		});
 	}
 	return true;
@@ -510,7 +489,7 @@ void _manageAppLnk(bool create, bool silent, int path_csidl, const wchar_t *args
 	WCHAR startupFolder[MAX_PATH];
 	HRESULT hr = SHGetFolderPath(0, path_csidl, 0, SHGFP_TYPE_CURRENT, startupFolder);
 	if (SUCCEEDED(hr)) {
-		QString lnk = QString::fromWCharArray(startupFolder) + '\\' + str_const_toString(AppFile) + qsl(".lnk");
+		QString lnk = QString::fromWCharArray(startupFolder) + '\\' + AppFile.utf16() + qsl(".lnk");
 		if (create) {
 			ComPtr<IShellLink> shellLink;
 			hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&shellLink));
@@ -563,7 +542,7 @@ void psSendToMenu(bool send, bool silent) {
 }
 
 void psWriteDump() {
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 	PROCESS_MEMORY_COUNTERS data = { 0 };
 	if (Dlls::GetProcessMemoryInfo
 		&& Dlls::GetProcessMemoryInfo(
@@ -584,7 +563,7 @@ void psWriteDump() {
 			<< (data.PagefileUsage / mb)
 			<< " MB (current)\n";
 	}
-#endif // TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // DESKTOP_APP_DISABLE_CRASH_REPORTS
 }
 
 bool psLaunchMaps(const Data::LocationPoint &point) {

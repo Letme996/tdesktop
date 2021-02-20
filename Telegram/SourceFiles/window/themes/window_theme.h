@@ -15,6 +15,10 @@ class Session;
 } // namespace Main
 
 namespace Window {
+class Controller;
+} // namespace Window
+
+namespace Window {
 namespace Theme {
 
 inline constexpr auto kThemeSchemeSizeLimit = 1024 * 1024;
@@ -76,6 +80,9 @@ QString NightThemePath();
 void SetNightModeValue(bool nightMode);
 void ToggleNightMode();
 void ToggleNightMode(const QString &themePath);
+void ToggleNightModeWithConfirmation(
+	not_null<Controller*> window,
+	Fn<void()> toggle);
 void ResetToSomeDefault();
 [[nodiscard]] bool IsNonDefaultBackground();
 void Revert();
@@ -111,7 +118,8 @@ struct BackgroundUpdate {
 	[[nodiscard]] bool paletteChanged() const {
 		return (type == Type::TestingTheme)
 			|| (type == Type::RevertingTheme)
-			|| (type == Type::ApplyingEdit);
+			|| (type == Type::ApplyingEdit)
+			|| (type == Type::New);
 	}
 	Type type;
 	bool tiled;
@@ -129,11 +137,12 @@ class ChatBackground
 public:
 	ChatBackground();
 
+	void start();
+
 	// This method is allowed to (and should) be called before start().
 	void setThemeData(QImage &&themeImage, bool themeTile);
 
 	// This method is setting the default (themed) image if none was set yet.
-	void start();
 	void set(const Data::WallPaper &paper, QImage image = QImage());
 	void setTile(bool tile);
 	void setTileDayValue(bool tile);
@@ -168,6 +177,7 @@ public:
 	[[nodiscard]] bool tileDay() const;
 	[[nodiscard]] bool tileNight() const;
 	[[nodiscard]] bool isMonoColorImage() const;
+	[[nodiscard]] bool nightModeChangeAllowed() const;
 
 private:
 	struct AdjustableColor {
@@ -177,7 +187,8 @@ private:
 		QColor original;
 	};
 
-	void ensureStarted();
+	[[nodiscard]] bool started() const;
+	void initialRead();
 	void saveForRevert();
 	void setPreparedImage(QImage original, QImage prepared);
 	void preparePixmaps(QImage image);
@@ -224,6 +235,8 @@ private:
 	bool _nightMode = false;
 	bool _tileDayValue = false;
 	bool _tileNightValue = true;
+	std::optional<bool> _localStoredTileDayValue;
+	std::optional<bool> _localStoredTileNightValue;
 
 	bool _isMonoColorImage = false;
 

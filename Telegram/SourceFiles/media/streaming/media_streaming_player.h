@@ -12,10 +12,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/weak_ptr.h"
 #include "base/timer.h"
 
-namespace Data {
-class Session;
-} // namespace Data
-
 namespace Media {
 namespace Player {
 struct TrackState;
@@ -29,11 +25,12 @@ class Reader;
 class File;
 class AudioTrack;
 class VideoTrack;
+class Instance;
 
 class Player final : private FileDelegate {
 public:
 	// Public interfaces is used from the main thread.
-	Player(not_null<Data::Session*> owner, std::shared_ptr<Reader> reader);
+	explicit Player(std::shared_ptr<Reader> reader);
 
 	// Because we remember 'this' in calls to crl::on_main.
 	Player(const Player &other) = delete;
@@ -44,11 +41,15 @@ public:
 	void resume();
 	void stop();
 
+	// Allow to irreversibly stop only audio track.
+	void stopAudio();
+
 	[[nodiscard]] bool active() const;
 	[[nodiscard]] bool ready() const;
 
 	[[nodiscard]] float64 speed() const;
 	void setSpeed(float64 speed); // 0.5 <= speed <= 2.
+	void setWaitForMarkAsShown(bool wait);
 
 	[[nodiscard]] bool playing() const;
 	[[nodiscard]] bool buffering() const;
@@ -60,9 +61,19 @@ public:
 	[[nodiscard]] rpl::producer<bool> fullInCache() const;
 
 	[[nodiscard]] QSize videoSize() const;
-	[[nodiscard]] QImage frame(const FrameRequest &request) const;
+	[[nodiscard]] QImage frame(
+		const FrameRequest &request,
+		const Instance *instance = nullptr) const;
+	void unregisterInstance(not_null<const Instance*> instance);
+	bool markFrameShown();
+
+	void setLoaderPriority(int priority);
 
 	[[nodiscard]] Media::Player::TrackState prepareLegacyState() const;
+
+	void lock();
+	void unlock();
+	[[nodiscard]] bool locked() const;
 
 	[[nodiscard]] rpl::lifetime &lifetime();
 
@@ -84,7 +95,9 @@ private:
 	void fileError(Error error) override;
 	void fileWaitingForData() override;
 	void fileFullInCache(bool fullInCache) override;
-	bool fileProcessPacket(FFmpeg::Packet &&packet) override;
+	bool fileProcessPackets(
+		base::flat_map<int, std::vector<FFmpeg::Packet>> &packets) override;
+	void fileProcessEndOfFile() override;
 	bool fileReadMore() override;
 
 	// Called from the main thread.
@@ -175,6 +188,7 @@ private:
 
 	crl::time _startedTime = kTimeUnknown;
 	crl::time _pausedTime = kTimeUnknown;
+	crl::time _currentFrameTime = kTimeUnknown;
 	crl::time _nextFrameTime = kTimeUnknown;
 	base::Timer _renderFrameTimer;
 	rpl::event_stream<Update, Error> _updates;
@@ -187,6 +201,8 @@ private:
 	std::atomic<int> _durationByPackets = 0;
 	int _durationByLastAudioPacket = 0;
 	int _durationByLastVideoPacket = 0;
+
+	int _locks = 0;
 
 	rpl::lifetime _lifetime;
 	rpl::lifetime _sessionLifetime;

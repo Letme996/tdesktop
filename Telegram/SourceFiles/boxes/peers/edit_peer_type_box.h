@@ -11,18 +11,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/timer.h"
 
 namespace style {
-struct InfoProfileCountButton;
+struct SettingsCountButton;
 } // namespace style
 
 namespace Ui {
 class VerticalLayout;
+class SettingsButton;
 } // namespace Ui
-
-namespace Info {
-namespace Profile {
-class Button;
-} // namespace Profile
-} // namespace Info
 
 enum class Privacy {
 	HasUsername,
@@ -35,11 +30,8 @@ enum class UsernameState {
 	NotAvailable,
 };
 
-class EditPeerTypeBox : public BoxContent {
+class EditPeerTypeBox : public Ui::BoxContent {
 public:
-	// Edit just the invite link.
-	EditPeerTypeBox(QWidget*, not_null<PeerData*> peer);
-
 	EditPeerTypeBox(
 		QWidget*,
 		not_null<PeerData*> peer,
@@ -48,6 +40,11 @@ public:
 		std::optional<Privacy> privacySaved,
 		std::optional<QString> usernameSaved,
 		std::optional<rpl::producer<QString>> usernameError = {});
+
+	// For invite link only.
+	EditPeerTypeBox(
+		QWidget*,
+		not_null<PeerData*> peer);
 
 protected:
 	void prepare() override;

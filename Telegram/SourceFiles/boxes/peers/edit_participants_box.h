@@ -50,7 +50,7 @@ enum class ParticipantsRole {
 	Kicked,
 };
 
-class ParticipantsOnlineSorter : private base::Subscriber {
+class ParticipantsOnlineSorter {
 public:
 	ParticipantsOnlineSorter(
 		not_null<PeerData*> peer,
@@ -63,10 +63,11 @@ private:
 	void sortDelayed();
 	void refreshOnlineCount();
 
-	not_null<PeerData*> _peer;
-	not_null<PeerListDelegate*> _delegate;
+	const not_null<PeerData*> _peer;
+	const not_null<PeerListDelegate*> _delegate;
 	base::Timer _sortByOnlineTimer;
 	rpl::variable<int> _onlineCount = 0;
+	rpl::lifetime _lifetime;
 
 };
 
@@ -88,6 +89,7 @@ public:
 	[[nodiscard]] bool canEditAdmin(not_null<UserData*> user) const;
 	[[nodiscard]] bool canAddOrEditAdmin(not_null<UserData*> user) const;
 	[[nodiscard]] bool canRestrictUser(not_null<UserData*> user) const;
+	[[nodiscard]] bool canRemoveUser(not_null<UserData*> user) const;
 	[[nodiscard]] std::optional<MTPChatAdminRights> adminRights(
 		not_null<UserData*> user) const;
 	QString adminRank(not_null<UserData*> user) const;
@@ -99,7 +101,7 @@ public:
 	[[nodiscard]] UserData *adminPromotedBy(not_null<UserData*> user) const;
 	[[nodiscard]] UserData *restrictedBy(not_null<UserData*> user) const;
 
-	void migrate(not_null<ChannelData*> channel);
+	void migrate(not_null<ChatData*> chat, not_null<ChannelData*> channel);
 
 private:
 	UserData *applyCreator(const MTPDchannelParticipantCreator &data);
@@ -133,8 +135,6 @@ private:
 // Viewing admins, banned or restricted users list with search.
 class ParticipantsBoxController
 	: public PeerListController
-	, private base::Subscriber
-	, private MTP::Sender
 	, public base::has_weak_ptr {
 public:
 	using Role = ParticipantsRole;
@@ -170,6 +170,16 @@ public:
 	rpl::producer<int> onlineCountValue() const override;
 
 protected:
+	// Allow child controllers not providing navigation.
+	// This is their responsibility to override all methods that use it.
+	struct CreateTag {
+	};
+	ParticipantsBoxController(
+		CreateTag,
+		Window::SessionNavigation *navigation,
+		not_null<PeerData*> peer,
+		Role role);
+
 	virtual std::unique_ptr<PeerListRow> createRow(
 		not_null<UserData*> user) const;
 
@@ -232,28 +242,29 @@ private:
 	void recomputeTypeFor(not_null<UserData*> user);
 
 	void subscribeToMigration();
-	void migrate(not_null<ChannelData*> channel);
+	void migrate(not_null<ChatData*> chat, not_null<ChannelData*> channel);
 	void subscribeToCreatorChange(not_null<ChannelData*> channel);
 	void fullListRefresh();
 
-	not_null<Window::SessionNavigation*> _navigation;
+	// It may be nullptr in subclasses of this controller.
+	Window::SessionNavigation *_navigation = nullptr;
+
 	not_null<PeerData*> _peer;
+	MTP::Sender _api;
 	Role _role = Role::Admins;
 	int _offset = 0;
 	mtpRequestId _loadRequestId = 0;
 	bool _allLoaded = false;
 	ParticipantsAdditionalData _additional;
 	std::unique_ptr<ParticipantsOnlineSorter> _onlineSorter;
-	BoxPointer _editBox;
-	BoxPointer _addBox;
-	QPointer<BoxContent> _editParticipantBox;
+	Ui::BoxPointer _editBox;
+	Ui::BoxPointer _addBox;
+	QPointer<Ui::BoxContent> _editParticipantBox;
 
 };
 
 // Members, banned and restricted users server side search.
-class ParticipantsBoxSearchController
-	: public PeerListSearchController
-	, private MTP::Sender {
+class ParticipantsBoxSearchController : public PeerListSearchController {
 public:
 	using Role = ParticipantsBoxController::Role;
 
@@ -295,6 +306,7 @@ private:
 	not_null<ChannelData*> _channel;
 	Role _role = Role::Restricted;
 	not_null<ParticipantsAdditionalData*> _additional;
+	MTP::Sender _api;
 
 	base::Timer _timer;
 	QString _query;

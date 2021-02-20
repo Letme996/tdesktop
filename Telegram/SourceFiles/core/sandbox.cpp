@@ -7,7 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "core/sandbox.h"
 
-#include "platform/platform_info.h"
+#include "base/platform/base_platform_info.h"
+#include "platform/platform_specific.h"
 #include "mainwidget.h"
 #include "mainwindow.h"
 #include "storage/localstorage.h"
@@ -23,19 +24,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/invoke_queued.h"
 #include "base/qthelp_url.h"
 #include "base/qthelp_regex.h"
+#include "base/qt_adapters.h"
 #include "ui/effects/animations.h"
 #include "facades.h"
 #include "app.h"
 
+#include <QtGui/QSessionManager>
 #include <QtGui/QScreen>
 
 namespace Core {
 namespace {
 
 constexpr auto kEmptyPidForCommandResponse = 0ULL;
-
-using ErrorSignal = void(QLocalSocket::*)(QLocalSocket::LocalSocketError);
-const auto QLocalSocket_error = ErrorSignal(&QLocalSocket::error);
 
 QChar _toHex(ushort v) {
 	v = v & 0x000F;
@@ -84,11 +84,12 @@ Sandbox::Sandbox(
 : QApplication(argc, argv)
 , _mainThreadId(QThread::currentThreadId())
 , _handleObservables([=] {
-	Expects(_application != nullptr);
-
-	_application->call_handleObservables();
+	if (_application) {
+		_application->call_handleObservables();
+	}
 })
 , _launcher(launcher) {
+	setQuitOnLastWindowClosed(false);
 }
 
 int Sandbox::start() {
@@ -98,12 +99,7 @@ int Sandbox::start() {
 	const auto d = QFile::encodeName(QDir(cWorkingDir()).absolutePath());
 	char h[33] = { 0 };
 	hashMd5Hex(d.constData(), d.size(), h);
-#ifndef OS_MAC_STORE
-	_localServerName = psServerPrefix() + h + '-' + cGUIDStr();
-#else // OS_MAC_STORE
-	h[4] = 0; // use only first 4 chars
-	_localServerName = psServerPrefix() + h;
-#endif // OS_MAC_STORE
+	_localServerName = Platform::SingleInstanceLocalServerName(h);
 
 	connect(
 		&_localSocket,
@@ -115,7 +111,7 @@ int Sandbox::start() {
 		[=] { socketDisconnected(); });
 	connect(
 		&_localSocket,
-		QLocalSocket_error,
+		base::QLocalSocket_error,
 		[=](QLocalSocket::LocalSocketError error) { socketError(error); });
 	connect(
 		&_localSocket,
@@ -136,6 +132,19 @@ int Sandbox::start() {
 			closeApplication();
 		});
 	});
+
+	// https://github.com/telegramdesktop/tdesktop/issues/948
+	// and https://github.com/telegramdesktop/tdesktop/issues/5022
+	const auto restartHint = [](QSessionManager &manager) {
+		manager.setRestartHint(QSessionManager::RestartNever);
+	};
+
+	connect(
+		this,
+		&QGuiApplication::saveStateRequest,
+		this,
+		restartHint,
+		Qt::DirectConnection);
 
 	if (cManyInstance()) {
 		LOG(("Many instance allowed, starting..."));
@@ -194,10 +203,10 @@ void Sandbox::setupScreenScale() {
 	if (ratio > 1.) {
 		if (!Platform::IsMac() || (ratio != 2.)) {
 			LOG(("Found non-trivial Device Pixel Ratio: %1").arg(ratio));
-			LOG(("Environmental variables: QT_DEVICE_PIXEL_RATIO='%1'").arg(QString::fromLatin1(qgetenv("QT_DEVICE_PIXEL_RATIO"))));
-			LOG(("Environmental variables: QT_SCALE_FACTOR='%1'").arg(QString::fromLatin1(qgetenv("QT_SCALE_FACTOR"))));
-			LOG(("Environmental variables: QT_AUTO_SCREEN_SCALE_FACTOR='%1'").arg(QString::fromLatin1(qgetenv("QT_AUTO_SCREEN_SCALE_FACTOR"))));
-			LOG(("Environmental variables: QT_SCREEN_SCALE_FACTORS='%1'").arg(QString::fromLatin1(qgetenv("QT_SCREEN_SCALE_FACTORS"))));
+			LOG(("Environmental variables: QT_DEVICE_PIXEL_RATIO='%1'").arg(qEnvironmentVariable("QT_DEVICE_PIXEL_RATIO")));
+			LOG(("Environmental variables: QT_SCALE_FACTOR='%1'").arg(qEnvironmentVariable("QT_SCALE_FACTOR")));
+			LOG(("Environmental variables: QT_AUTO_SCREEN_SCALE_FACTOR='%1'").arg(qEnvironmentVariable("QT_AUTO_SCREEN_SCALE_FACTOR")));
+			LOG(("Environmental variables: QT_SCREEN_SCALE_FACTORS='%1'").arg(qEnvironmentVariable("QT_SCREEN_SCALE_FACTORS")));
 		}
 		style::SetDevicePixelRatio(int(ratio));
 		cSetScreenScale(style::kScaleDefault);
@@ -207,7 +216,7 @@ void Sandbox::setupScreenScale() {
 Sandbox::~Sandbox() = default;
 
 bool Sandbox::event(QEvent *e) {
-	if (e->type() == QEvent::Close) {
+	if (e->type() == QEvent::Close || e->type() == QEvent::Quit) {
 		App::quit();
 	}
 	return QApplication::event(e);
@@ -279,7 +288,7 @@ void Sandbox::socketError(QLocalSocket::LocalSocketError e) {
 	psCheckLocalSocket(_localServerName);
 
 	if (!_localServer.listen(_localServerName)) {
-		LOG(("Failed to start listening to %1 server, error %2").arg(_localServerName).arg(int(_localServer.serverError())));
+		LOG(("Failed to start listening to %1 server: %2").arg(_localServerName).arg(_localServer.errorString()));
 		return App::quit();
 	}
 #endif // !Q_OS_WINRT
@@ -306,7 +315,7 @@ void Sandbox::singleInstanceChecked() {
 		return;
 	}
 	const auto result = CrashReports::Start();
-	result.match([&](CrashReports::Status status) {
+	v::match(result, [&](CrashReports::Status status) {
 		if (status == CrashReports::CantOpen) {
 			new NotStartedWindow();
 		} else {
@@ -329,7 +338,7 @@ void Sandbox::singleInstanceChecked() {
 			_lastCrashDump,
 			[=] { launchApplication(); });
 		window->proxyChanges(
-		) | rpl::start_with_next([=](ProxyData &&proxy) {
+		) | rpl::start_with_next([=](MTP::ProxyData &&proxy) {
 			_sandboxProxy = std::move(proxy);
 			refreshGlobalProxy();
 		}, window->lifetime());
@@ -378,11 +387,8 @@ void Sandbox::readClients() {
 						toSend.append(_escapeFrom7bit(cmds.mid(from + 5, to - from - 5)));
 					}
 				} else if (cmd.startsWith(qsl("OPEN:"))) {
-					auto activateRequired = true;
-					if (cStartUrl().isEmpty()) {
-						startUrl = _escapeFrom7bit(cmds.mid(from + 5, to - from - 5)).mid(0, 8192);
-						activateRequired = StartUrlRequiresActivate(startUrl);
-					}
+					startUrl = _escapeFrom7bit(cmds.mid(from + 5, to - from - 5)).mid(0, 8192);
+					auto activateRequired = StartUrlRequiresActivate(startUrl);
 					if (activateRequired) {
 						execExternal("show");
 					}
@@ -440,33 +446,28 @@ void Sandbox::checkForQuit() {
 }
 
 void Sandbox::refreshGlobalProxy() {
-#ifndef TDESKTOP_DISABLE_NETWORK_PROXY
 	const auto proxy = !Global::started()
 		? _sandboxProxy
-		: (Global::ProxySettings() == ProxyData::Settings::Enabled)
+		: (Global::ProxySettings() == MTP::ProxyData::Settings::Enabled)
 		? Global::SelectedProxy()
-		: ProxyData();
-	if (proxy.type == ProxyData::Type::Socks5
-		|| proxy.type == ProxyData::Type::Http) {
+		: MTP::ProxyData();
+	if (proxy.type == MTP::ProxyData::Type::Socks5
+		|| proxy.type == MTP::ProxyData::Type::Http) {
 		QNetworkProxy::setApplicationProxy(
-			ToNetworkProxy(ToDirectIpProxy(proxy)));
+			MTP::ToNetworkProxy(MTP::ToDirectIpProxy(proxy)));
 	} else if (!Global::started()
-		|| Global::ProxySettings() == ProxyData::Settings::System) {
+		|| Global::ProxySettings() == MTP::ProxyData::Settings::System) {
 		QNetworkProxyFactory::setUseSystemConfiguration(true);
 	} else {
 		QNetworkProxy::setApplicationProxy(QNetworkProxy::NoProxy);
 	}
-#endif // TDESKTOP_DISABLE_NETWORK_PROXY
 }
 
 uint64 Sandbox::installationTag() const {
 	return _launcher->installationTag();
 }
 
-void Sandbox::postponeCall(FnMut<void()> &&callable) {
-	Expects(callable != nullptr);
-	Expects(_eventNestingLevel >= _loopNestingLevel);
-
+void Sandbox::checkForEmptyLoopNestingLevel() {
 	// _loopNestingLevel == _eventNestingLevel means that we had a
 	// native event in a nesting loop that didn't get a notify() call
 	// after. That means we already have exited the nesting loop and
@@ -479,11 +480,17 @@ void Sandbox::postponeCall(FnMut<void()> &&callable) {
 		_loopNestingLevel = _previousLoopNestingLevels.back();
 		_previousLoopNestingLevels.pop_back();
 	}
+}
 
+void Sandbox::postponeCall(FnMut<void()> &&callable) {
+	Expects(callable != nullptr);
+	Expects(_eventNestingLevel >= _loopNestingLevel);
+
+	checkForEmptyLoopNestingLevel();
 	_postponedCalls.push_back({
 		_loopNestingLevel,
 		std::move(callable)
-		});
+	});
 }
 
 void Sandbox::incrementEventNestingLevel() {
@@ -491,16 +498,23 @@ void Sandbox::incrementEventNestingLevel() {
 }
 
 void Sandbox::decrementEventNestingLevel() {
+	Expects(_eventNestingLevel >= _loopNestingLevel);
+
 	if (_eventNestingLevel == _loopNestingLevel) {
 		_loopNestingLevel = _previousLoopNestingLevels.back();
 		_previousLoopNestingLevels.pop_back();
 	}
 	const auto processTillLevel = _eventNestingLevel - 1;
 	processPostponedCalls(processTillLevel);
+	checkForEmptyLoopNestingLevel();
 	_eventNestingLevel = processTillLevel;
+
+	Ensures(_eventNestingLevel >= _loopNestingLevel);
 }
 
 void Sandbox::registerEnterFromEventLoop() {
+	Expects(_eventNestingLevel >= _loopNestingLevel);
+
 	if (_eventNestingLevel > _loopNestingLevel) {
 		_previousLoopNestingLevels.push_back(_loopNestingLevel);
 		_loopNestingLevel = _eventNestingLevel;
@@ -555,7 +569,7 @@ rpl::producer<> Sandbox::widgetUpdateRequests() const {
 	return _widgetUpdateRequests.events();
 }
 
-ProxyData Sandbox::sandboxProxy() const {
+MTP::ProxyData Sandbox::sandboxProxy() const {
 	return _sandboxProxy;
 }
 

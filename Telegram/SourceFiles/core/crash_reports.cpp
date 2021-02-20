@@ -8,14 +8,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/crash_reports.h"
 
 #include "platform/platform_specific.h"
-#include "platform/platform_info.h"
+#include "base/platform/base_platform_info.h"
 #include "core/launcher.h"
 
 #include <signal.h>
 #include <new>
 #include <mutex>
 
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 
 // see https://blog.inventic.eu/2012/08/qt-and-google-breakpad/
 #ifdef Q_OS_WIN
@@ -39,7 +39,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "client/crashpad_client.h"
 #endif // else for MAC_USE_BREAKPAD
 
-#elif defined Q_OS_LINUX64 || defined Q_OS_LINUX32 // Q_OS_MAC
+#elif defined Q_OS_UNIX // Q_OS_MAC
 
 #include <execinfo.h>
 #include <signal.h>
@@ -47,9 +47,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "client/linux/handler/exception_handler.h"
 
-#endif // Q_OS_LINUX64 || Q_OS_LINUX32
+#endif // Q_OS_UNIX
 
-#endif // !TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 
 namespace CrashReports {
 namespace {
@@ -60,13 +60,11 @@ using AnnotationRefs = std::map<std::string, const QString*>;
 Annotations ProcessAnnotations;
 AnnotationRefs ProcessAnnotationRefs;
 
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 
 QString ReportPath;
 FILE *ReportFile = nullptr;
 int ReportFileNo = 0;
-char LaunchedDateTimeStr[32] = { 0 };
-char LaunchedBinaryName[256] = { 0 };
 
 void SafeWriteChar(char ch) {
 	fwrite(&ch, 1, 1, ReportFile);
@@ -140,7 +138,7 @@ QMutex ReportingMutex;
 const char *BreakpadDumpPath = nullptr;
 const wchar_t *BreakpadDumpPathW = nullptr;
 
-#if defined Q_OS_MAC || defined Q_OS_LINUX32 || defined Q_OS_LINUX64
+#ifdef Q_OS_UNIX
 struct sigaction SIG_def[32];
 
 void SignalHandler(int signum, siginfo_t *info, void *ucontext) {
@@ -148,9 +146,9 @@ void SignalHandler(int signum, siginfo_t *info, void *ucontext) {
 		sigaction(signum, &SIG_def[signum], 0);
 	}
 
-#else // Q_OS_MAC || Q_OS_LINUX32 || Q_OS_LINUX64
+#else // Q_OS_UNIX
 void SignalHandler(int signum) {
-#endif // else for Q_OS_MAC || Q_OS_LINUX || Q_OS_LINUX64
+#endif // else for Q_OS_UNIX
 
 	const char* name = 0;
 	switch (signum) {
@@ -201,18 +199,18 @@ void SignalHandler(int signum) {
 	if (name) {
 		dump() << "Caught signal " << signum << " (" << name << ") in thread " << uint64(thread) << "\n";
 	} else if (signum == -1) {
-        dump() << "Google Breakpad caught a crash, minidump written in thread " << uint64(thread) << "\n";
-        if (BreakpadDumpPath) {
-            dump() << "Minidump: " << BreakpadDumpPath << "\n";
-        } else if (BreakpadDumpPathW) {
-            dump() << "Minidump: " << BreakpadDumpPathW << "\n";
-        }
-    } else {
+		dump() << "Google Breakpad caught a crash, minidump written in thread " << uint64(thread) << "\n";
+		if (BreakpadDumpPath) {
+			dump() << "Minidump: " << BreakpadDumpPath << "\n";
+		} else if (BreakpadDumpPathW) {
+			dump() << "Minidump: " << BreakpadDumpPathW << "\n";
+		}
+	} else {
 		dump() << "Caught signal " << signum << " in thread " << uint64(thread) << "\n";
 	}
 
 	// see https://github.com/benbjohnson/bandicoot
-#if defined Q_OS_MAC || defined Q_OS_LINUX32 || defined Q_OS_LINUX64
+#ifdef Q_OS_UNIX
 	ucontext_t *uc = (ucontext_t*)ucontext;
 
 	void *caller = 0;
@@ -246,18 +244,18 @@ void SignalHandler(int signum) {
 #endif
 	}
 
-    void *addresses[132] = { 0 };
+	void *addresses[132] = { 0 };
 	size_t size = backtrace(addresses, 128);
 
 	/* overwrite sigaction with caller's address */
-    if (caller) {
-        for (int i = size; i > 1; --i) {
-            addresses[i + 3] = addresses[i];
-        }
-        addresses[2] = (void*)0x1;
-        addresses[3] = caller;
-        addresses[4] = (void*)0x1;
-    }
+	if (caller) {
+		for (int i = size; i > 1; --i) {
+			addresses[i + 3] = addresses[i];
+		}
+		addresses[2] = (void*)0x1;
+		addresses[3] = caller;
+		addresses[4] = (void*)0x1;
+	}
 
 #ifdef Q_OS_MAC
 	dump() << "\nBase image addresses:\n";
@@ -276,9 +274,9 @@ void SignalHandler(int signum) {
 
 	backtrace_symbols_fd(addresses, size, ReportFileNo);
 
-#else // Q_OS_MAC || Q_OS_LINUX32 || Q_OS_LINUX64
+#else // Q_OS_UNIX
 	dump() << "\nBacktrace omitted.\n";
-#endif // else for Q_OS_MAC || Q_OS_LINUX32 || Q_OS_LINUX64
+#endif // else for Q_OS_UNIX
 
 	dump() << "\n";
 
@@ -294,22 +292,22 @@ google_breakpad::ExceptionHandler* BreakpadExceptionHandler = 0;
 bool DumpCallback(const wchar_t* _dump_dir, const wchar_t* _minidump_id, void* context, EXCEPTION_POINTERS* exinfo, MDRawAssertionInfo* assertion, bool success)
 #elif defined Q_OS_MAC // Q_OS_WIN
 bool DumpCallback(const char* _dump_dir, const char* _minidump_id, void *context, bool success)
-#elif defined Q_OS_LINUX64 || defined Q_OS_LINUX32 // Q_OS_MAC
+#elif defined Q_OS_UNIX // Q_OS_MAC
 bool DumpCallback(const google_breakpad::MinidumpDescriptor &md, void *context, bool success)
-#endif // Q_OS_LINUX64 || Q_OS_LINUX32
+#endif // Q_OS_UNIX
 {
 	if (CrashLogged) return success;
 	CrashLogged = true;
 
 #ifdef Q_OS_WIN
-    BreakpadDumpPathW = _minidump_id;
+	BreakpadDumpPathW = _minidump_id;
 	SignalHandler(-1);
 #else // Q_OS_WIN
 
 #ifdef Q_OS_MAC
-    BreakpadDumpPath = _minidump_id;
+	BreakpadDumpPath = _minidump_id;
 #else // Q_OS_MAC
-    BreakpadDumpPath = md.path();
+	BreakpadDumpPath = md.path();
 #endif // else for Q_OS_MAC
 	SignalHandler(-1, 0, 0);
 #endif // else for Q_OS_WIN
@@ -317,19 +315,23 @@ bool DumpCallback(const google_breakpad::MinidumpDescriptor &md, void *context, 
 }
 #endif // !Q_OS_MAC || MAC_USE_BREAKPAD
 
-#endif // !TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 
 } // namespace
 
 QString PlatformString() {
 	if (Platform::IsWindowsStoreBuild()) {
-		return qsl("WinStore");
-	} else if (Platform::IsWindows()) {
-		return qsl("Windows");
+		return Platform::IsWindows64Bit()
+			? qsl("WinStore64Bit")
+			: qsl("WinStore32Bit");
+	} else if (Platform::IsWindows32Bit()) {
+		return qsl("Windows32Bit");
+	} else if (Platform::IsWindows64Bit()) {
+		return qsl("Windows64Bit");
 	} else if (Platform::IsMacStoreBuild()) {
 		return qsl("MacAppStore");
-	} else if (Platform::IsMacOldBuild()) {
-		return qsl("MacOSold");
+	} else if (Platform::IsOSXBuild()) {
+		return qsl("OSX");
 	} else if (Platform::IsMac()) {
 		return qsl("MacOS");
 	} else if (Platform::IsLinux32Bit()) {
@@ -341,7 +343,7 @@ QString PlatformString() {
 }
 
 void StartCatching(not_null<Core::Launcher*> launcher) {
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 	ProcessAnnotations["Binary"] = cExeName().toUtf8().constData();
 	ProcessAnnotations["ApiId"] = QString::number(ApiId).toUtf8().constData();
 	ProcessAnnotations["Version"] = (cAlphaVersion() ? qsl("%1 alpha").arg(cAlphaVersion()) : (AppBetaVersion ? qsl("%1 beta") : qsl("%1")).arg(AppVersion)).toUtf8().constData();
@@ -382,16 +384,17 @@ void StartCatching(not_null<Core::Launcher*> launcher) {
 	crashpad::CrashpadClient crashpad_client;
 	std::string handler = (cExeDir() + cExeName() + qsl("/Contents/Helpers/crashpad_handler")).toUtf8().constData();
 	std::string database = QFile::encodeName(dumpspath).constData();
-	if (crashpad_client.StartHandler(base::FilePath(handler),
-		                                base::FilePath(database),
-		                                std::string(),
-		                                ProcessAnnotations,
-		                                std::vector<std::string>(),
-		                                false)) {
+	if (crashpad_client.StartHandler(
+			base::FilePath(handler),
+			base::FilePath(database),
+			std::string(),
+			ProcessAnnotations,
+			std::vector<std::string>(),
+			false)) {
 		crashpad_client.UseHandler();
 	}
 #endif // else for MAC_USE_BREAKPAD
-#elif defined Q_OS_LINUX64 || defined Q_OS_LINUX32
+#elif defined Q_OS_UNIX
 	BreakpadExceptionHandler = new google_breakpad::ExceptionHandler(
 		google_breakpad::MinidumpDescriptor(QFile::encodeName(dumpspath).toStdString()),
 		/*FilterCallback*/ 0,
@@ -400,22 +403,22 @@ void StartCatching(not_null<Core::Launcher*> launcher) {
 		true,
 		-1
 	);
-#endif // Q_OS_LINUX64 || Q_OS_LINUX32
-#endif // !TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // Q_OS_UNIX
+#endif // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 }
 
 void FinishCatching() {
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 #if !defined Q_OS_MAC || defined MAC_USE_BREAKPAD
 
 	delete base::take(BreakpadExceptionHandler);
 
 #endif // !Q_OS_MAC || MAC_USE_BREAKPAD
-#endif // !TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 }
 
 StartResult Start() {
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 	ReportPath = cWorkingDir() + qsl("tdata/working");
 
 #ifdef Q_OS_WIN
@@ -441,12 +444,12 @@ StartResult Start() {
 		return lastdump;
 	}
 
-#endif // !TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 	return Restart();
 }
 
 Status Restart() {
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 	if (ReportFile) {
 		return Started;
 	}
@@ -495,13 +498,13 @@ Status Restart() {
 	LOG(("FATAL: Could not open '%1' for writing!").arg(ReportPath));
 
 	return CantOpen;
-#else // !TDESKTOP_DISABLE_CRASH_REPORTS
+#else // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 	return Started;
-#endif // else for !TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // else for !DESKTOP_APP_DISABLE_CRASH_REPORTS
 }
 
 void Finish() {
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 	FinishCatching();
 
 	if (ReportFile) {
@@ -514,7 +517,7 @@ void Finish() {
 		unlink(ReportPath.toUtf8().constData());
 #endif // else for Q_OS_WIN
 	}
-#endif // !TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // !DESKTOP_APP_DISABLE_CRASH_REPORTS
 }
 
 void SetAnnotation(const std::string &key, const QString &value) {
@@ -564,7 +567,7 @@ void SetAnnotationRef(const std::string &key, const QString *valuePtr) {
 	}
 }
 
-#ifndef TDESKTOP_DISABLE_CRASH_REPORTS
+#ifndef DESKTOP_APP_DISABLE_CRASH_REPORTS
 
 dump::~dump() {
 	if (ReportFile) {
@@ -580,20 +583,20 @@ const dump &operator<<(const dump &stream, const char *str) {
 }
 
 const dump &operator<<(const dump &stream, const wchar_t *str) {
-    if (!ReportFile) return stream;
+	if (!ReportFile) return stream;
 
-    for (int i = 0, l = wcslen(str); i < l; ++i) {
-        if (
+	for (int i = 0, l = wcslen(str); i < l; ++i) {
+		if (
 #if !defined(__WCHAR_UNSIGNED__)
-            str[i] >= 0 &&
+			str[i] >= 0 &&
 #endif
-            str[i] < 128) {
+			str[i] < 128) {
 			SafeWriteChar(char(str[i]));
-        } else {
+		} else {
 			SafeWriteChar('?');
-        }
-    }
-    return stream;
+		}
+	}
+	return stream;
 }
 
 const dump &operator<<(const dump &stream, int num) {
@@ -629,6 +632,6 @@ const dump &operator<<(const dump &stream, double num) {
 	return stream;
 }
 
-#endif // TDESKTOP_DISABLE_CRASH_REPORTS
+#endif // DESKTOP_APP_DISABLE_CRASH_REPORTS
 
 } // namespace CrashReports

@@ -11,15 +11,16 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_channel.h"
 #include "data/data_chat.h"
 #include "ui/widgets/labels.h"
+#include "ui/widgets/buttons.h"
 #include "ui/wrap/vertical_layout.h"
 #include "ui/text/text_utilities.h" // Ui::Text::ToUpper
-#include "info/profile/info_profile_button.h"
 #include "boxes/peer_list_box.h"
 #include "boxes/confirm_box.h"
 #include "boxes/add_contact_box.h"
 #include "apiwrap.h"
 #include "facades.h"
 #include "main/main_session.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 #include "styles/style_info.h"
 
@@ -145,20 +146,17 @@ void Controller::choose(not_null<ChannelData*> chat) {
 				Ui::Text::RichLangValue));
 		}
 	}
-	const auto box = std::make_shared<QPointer<BoxContent>>();
-	const auto sure = [=] {
-		if (*box) {
-			(*box)->closeBox();
-		}
+	const auto sure = [=](Fn<void()> &&close) {
+		close();
 		const auto onstack = _callback;
 		onstack(chat);
 	};
-	*box = Ui::show(
+	Ui::show(
 		Box<ConfirmBox>(
 			text,
 			tr::lng_manage_discussion_group_link(tr::now),
 			sure),
-		LayerOption::KeepOther);
+		Ui::LayerOption::KeepOther);
 }
 
 void Controller::choose(not_null<ChatData*> chat) {
@@ -177,23 +175,20 @@ void Controller::choose(not_null<ChatData*> chat) {
 	text.append(tr::lng_manage_discussion_group_warning(
 		tr::now,
 		Ui::Text::RichLangValue));
-	const auto box = std::make_shared<QPointer<BoxContent>>();
-	const auto sure = [=] {
-		if (*box) {
-			(*box)->closeBox();
-		}
+	const auto sure = [=](Fn<void()> &&close) {
+		close();
 		const auto done = [=](not_null<ChannelData*> chat) {
 			const auto onstack = _callback;
 			onstack(chat);
 		};
 		chat->session().api().migrateChat(chat, crl::guard(this, done));
 	};
-	*box = Ui::show(
+	Ui::show(
 		Box<ConfirmBox>(
 			text,
 			tr::lng_manage_discussion_group_link(tr::now),
 			sure),
-		LayerOption::KeepOther);
+		Ui::LayerOption::KeepOther);
 }
 
 object_ptr<Ui::RpWidget> SetupAbout(
@@ -222,7 +217,7 @@ object_ptr<Ui::RpWidget> SetupAbout(
 			tr::now,
 			Ui::Text::WithEntities);
 	}());
-	return std::move(about);
+	return about;
 }
 
 object_ptr<Ui::RpWidget> SetupFooter(
@@ -243,7 +238,7 @@ object_ptr<Ui::RpWidget> SetupCreateGroup(
 		Fn<void(ChannelData*)> callback) {
 	Expects(channel->isBroadcast());
 
-	auto result = object_ptr<Info::Profile::Button>(
+	auto result = object_ptr<Ui::SettingsButton>(
 		parent,
 		tr::lng_manage_discussion_group_create(
 		) | Ui::Text::ToUpper(),
@@ -256,7 +251,7 @@ object_ptr<Ui::RpWidget> SetupCreateGroup(
 				GroupInfoBox::Type::Megagroup,
 				channel->name + " Chat",
 				guarded),
-			LayerOption::KeepOther);
+			Ui::LayerOption::KeepOther);
 	});
 	return result;
 }
@@ -265,7 +260,7 @@ object_ptr<Ui::RpWidget> SetupUnlink(
 		not_null<QWidget*> parent,
 		not_null<ChannelData*> channel,
 		Fn<void(ChannelData*)> callback) {
-	auto result = object_ptr<Info::Profile::Button>(
+	auto result = object_ptr<Ui::SettingsButton>(
 		parent,
 		(channel->isBroadcast()
 			? tr::lng_manage_discussion_group_unlink
@@ -277,7 +272,7 @@ object_ptr<Ui::RpWidget> SetupUnlink(
 	return result;
 }
 
-object_ptr<BoxContent> EditLinkedChatBox(
+object_ptr<Ui::BoxContent> EditLinkedChatBox(
 		not_null<Window::SessionNavigation*> navigation,
 		not_null<ChannelData*> channel,
 		ChannelData *chat,
@@ -324,7 +319,7 @@ object_ptr<BoxContent> EditLinkedChatBox(
 
 } // namespace
 
-object_ptr<BoxContent> EditLinkedChatBox(
+object_ptr<Ui::BoxContent> EditLinkedChatBox(
 		not_null<Window::SessionNavigation*> navigation,
 		not_null<ChannelData*> channel,
 		std::vector<not_null<PeerData*>> &&chats,
@@ -338,7 +333,7 @@ object_ptr<BoxContent> EditLinkedChatBox(
 		callback);
 }
 
-object_ptr<BoxContent> EditLinkedChatBox(
+object_ptr<Ui::BoxContent> EditLinkedChatBox(
 		not_null<Window::SessionNavigation*> navigation,
 		not_null<ChannelData*> channel,
 		not_null<ChannelData*> chat,

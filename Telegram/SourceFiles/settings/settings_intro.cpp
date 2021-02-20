@@ -18,10 +18,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/widgets/labels.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/scroll_area.h"
+#include "ui/cached_round_corners.h"
 #include "lang/lang_keys.h"
-#include "app.h"
+#include "boxes/abstract_box.h"
+#include "window/window_controller.h"
 #include "styles/style_settings.h"
-#include "styles/style_boxes.h"
+#include "styles/style_layers.h"
 #include "styles/style_info.h"
 
 namespace Settings {
@@ -55,15 +57,15 @@ private:
 
 };
 
-object_ptr<Ui::RpWidget> CreateIntroSettings(QWidget *parent) {
+object_ptr<Ui::RpWidget> CreateIntroSettings(
+		QWidget *parent,
+		not_null<Window::Controller*> window) {
 	auto result = object_ptr<Ui::VerticalLayout>(parent);
 
 	AddDivider(result);
 	AddSkip(result);
 	SetupLanguageButton(result, false);
-	if (HasConnectionType()) {
-		SetupConnectionType(result);
-	}
+	SetupConnectionType(&window->account(), result);
 	AddSkip(result);
 	if (HasUpdate()) {
 		AddDivider(result);
@@ -71,16 +73,22 @@ object_ptr<Ui::RpWidget> CreateIntroSettings(QWidget *parent) {
 		SetupUpdate(result);
 		AddSkip(result);
 	}
-	if (HasTray()) {
-		AddDivider(result);
-		AddSkip(result);
-		SetupTray(result);
-		AddSkip(result);
+	{
+		auto wrap = object_ptr<Ui::VerticalLayout>(result);
+		SetupSystemIntegrationContent(wrap.data());
+		if (wrap->count() > 0) {
+			AddDivider(result);
+			AddSkip(result);
+			result->add(object_ptr<Ui::OverrideMargins>(
+				result,
+				std::move(wrap)));
+			AddSkip(result);
+		}
 	}
 	AddDivider(result);
 	AddSkip(result);
 	SetupInterfaceScale(result, false);
-	SetupDefaultThemes(result);
+	SetupDefaultThemes(window, result);
 	AddSkip(result);
 
 	if (anim::Disabled()) {
@@ -161,7 +169,9 @@ void TopBar::paintEvent(QPaintEvent *e) {
 
 class IntroWidget : public Ui::RpWidget {
 public:
-	IntroWidget(QWidget *parent);
+	IntroWidget(
+		QWidget *parent,
+		not_null<Window::Controller*> window);
 
 	void forceContentRepaint();
 
@@ -183,7 +193,7 @@ private:
 	void updateControlsGeometry();
 	QRect contentGeometry() const;
 	void setInnerWidget(object_ptr<Ui::RpWidget> content);
-	void showContent();
+	void showContent(not_null<Window::Controller*> window);
 	rpl::producer<bool> topShadowToggledValue() const;
 	void createTopBar();
 	void applyAdditionalScroll(int additionalScroll);
@@ -202,7 +212,9 @@ private:
 
 };
 
-IntroWidget::IntroWidget(QWidget *parent)
+IntroWidget::IntroWidget(
+	QWidget *parent,
+	not_null<Window::Controller*> window)
 : RpWidget(parent)
 , _wrap(this)
 , _scroll(Ui::CreateChild<Ui::ScrollArea>(_wrap.data(), st::infoScroll))
@@ -220,7 +232,7 @@ IntroWidget::IntroWidget(QWidget *parent)
 	}, lifetime());
 
 	createTopBar();
-	showContent();
+	showContent(window);
 	_topShadow->toggleOn(
 		topShadowToggledValue(
 		) | rpl::filter([](bool shown) {
@@ -315,8 +327,8 @@ rpl::producer<bool> IntroWidget::topShadowToggledValue() const {
 	) | rpl::map((_1 > 0) || (_2 > 0));
 }
 
-void IntroWidget::showContent() {
-	setInnerWidget(CreateIntroSettings(_scroll));
+void IntroWidget::showContent(not_null<Window::Controller*> window) {
+	setInnerWidget(CreateIntroSettings(_scroll, window));
 
 	_additionalScroll = 0;
 	updateControlsGeometry();
@@ -346,7 +358,9 @@ void IntroWidget::resizeEvent(QResizeEvent *e) {
 }
 
 void IntroWidget::keyPressEvent(QKeyEvent *e) {
-	CodesFeedString(nullptr, e->text());
+	crl::on_main(this, [text = e->text()]{
+		CodesFeedString(nullptr, text);
+	});
 	return RpWidget::keyPressEvent(e);
 }
 
@@ -392,8 +406,8 @@ rpl::producer<int> IntroWidget::scrollTillBottomChanges() const {
 
 IntroWidget::~IntroWidget() = default;
 
-LayerWidget::LayerWidget(QWidget*)
-: _content(this) {
+LayerWidget::LayerWidget(QWidget*, not_null<Window::Controller*> window)
+: _content(this, window) {
 	setupHeightConsumers();
 }
 
@@ -459,7 +473,7 @@ int LayerWidget::resizeGetHeight(int newWidth) {
 		_tillTop = _tillBottom = true;
 		return windowHeight;
 	}
-	auto newTop = snap(
+	auto newTop = std::clamp(
 		windowHeight / 24,
 		st::infoLayerTopMinimal,
 		st::infoLayerTopMaximal);
@@ -518,11 +532,11 @@ void LayerWidget::paintEvent(QPaintEvent *e) {
 		parts |= RectPart::FullBottom;
 	}
 	if (parts) {
-		App::roundRect(
+		Ui::FillRoundRect(
 			p,
 			rect(),
 			st::boxBg,
-			BoxCorners,
+			Ui::BoxCorners,
 			nullptr,
 			parts);
 	}

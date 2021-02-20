@@ -13,13 +13,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 struct WebPageData;
 
+namespace Data {
+class Session;
+} // namespace Data
+
 namespace HistoryView {
 class Element;
 class Document;
 } // namespace HistoryView
 
 struct HistoryMessageVia : public RuntimeComponent<HistoryMessageVia, HistoryItem> {
-	void create(UserId userId);
+	void create(not_null<Data::Session*> owner, UserId userId);
 	void resize(int32 availw) const;
 
 	UserData *bot = nullptr;
@@ -30,18 +34,32 @@ struct HistoryMessageVia : public RuntimeComponent<HistoryMessageVia, HistoryIte
 };
 
 struct HistoryMessageViews : public RuntimeComponent<HistoryMessageViews, HistoryItem> {
-	QString _viewsText;
-	int _views = 0;
-	int _viewsWidth = 0;
+	static constexpr auto kMaxRecentRepliers = 3;
+
+	struct Part {
+		QString text;
+		int textWidth = 0;
+		int count = -1;
+	};
+	std::vector<PeerId> recentRepliers;
+	Part views;
+	Part replies;
+	Part repliesSmall;
+	MsgId repliesInboxReadTillId = 0;
+	MsgId repliesOutboxReadTillId = 0;
+	MsgId repliesMaxId = 0;
+	ChannelId commentsMegagroupId = 0;
+	MsgId commentsRootId = 0;
 };
 
 struct HistoryMessageSigned : public RuntimeComponent<HistoryMessageSigned, HistoryItem> {
 	void refresh(const QString &date);
 	int maxWidth() const;
 
-	bool isElided = false;
 	QString author;
 	Ui::Text::String signature;
+	bool isElided = false;
+	bool isAnonymousRank = false;
 };
 
 struct HistoryMessageEdited : public RuntimeComponent<HistoryMessageEdited, HistoryItem> {
@@ -53,7 +71,7 @@ struct HistoryMessageEdited : public RuntimeComponent<HistoryMessageEdited, Hist
 };
 
 struct HiddenSenderInfo {
-	explicit HiddenSenderInfo(const QString &name);
+	HiddenSenderInfo(const QString &name, bool external);
 
 	QString name;
 	QString firstName;
@@ -77,11 +95,13 @@ struct HistoryMessageForwarded : public RuntimeComponent<HistoryMessageForwarded
 	PeerData *originalSender = nullptr;
 	std::unique_ptr<HiddenSenderInfo> hiddenSenderInfo;
 	QString originalAuthor;
+	QString psaType;
 	MsgId originalId = 0;
 	mutable Ui::Text::String text = { 1 };
 
 	PeerData *savedFromPeer = nullptr;
 	MsgId savedFromMsgId = 0;
+	bool imported = false;
 };
 
 struct HistoryMessageReply : public RuntimeComponent<HistoryMessageReply, HistoryItem> {
@@ -90,7 +110,10 @@ struct HistoryMessageReply : public RuntimeComponent<HistoryMessageReply, Histor
 	HistoryMessageReply(HistoryMessageReply &&other) = delete;
 	HistoryMessageReply &operator=(const HistoryMessageReply &other) = delete;
 	HistoryMessageReply &operator=(HistoryMessageReply &&other) {
+		replyToPeerId = other.replyToPeerId;
 		replyToMsgId = other.replyToMsgId;
+		replyToMsgTop = other.replyToMsgTop;
+		replyToDocumentId = other.replyToDocumentId;
 		std::swap(replyToMsg, other.replyToMsg);
 		replyToLnk = std::move(other.replyToLnk);
 		replyToName = std::move(other.replyToName);
@@ -130,20 +153,31 @@ struct HistoryMessageReply : public RuntimeComponent<HistoryMessageReply, Histor
 		int w,
 		PaintFlags flags) const;
 
-	MsgId replyToId() const {
+	[[nodiscard]] PeerId replyToPeer() const {
+		return replyToPeerId;
+	}
+	[[nodiscard]] MsgId replyToId() const {
 		return replyToMsgId;
 	}
-	int replyToWidth() const {
+	[[nodiscard]] MsgId replyToTop() const {
+		return replyToMsgTop;
+	}
+	[[nodiscard]] int replyToWidth() const {
 		return maxReplyWidth;
 	}
-	ClickHandlerPtr replyToLink() const {
+	[[nodiscard]] ClickHandlerPtr replyToLink() const {
 		return replyToLnk;
 	}
 	void setReplyToLinkFrom(
 		not_null<HistoryMessage*> holder);
 
+	void refreshReplyToDocument();
+
+	PeerId replyToPeerId = 0;
 	MsgId replyToMsgId = 0;
+	MsgId replyToMsgTop = 0;
 	HistoryItem *replyToMsg = nullptr;
+	DocumentId replyToDocumentId = 0;
 	ClickHandlerPtr replyToLnk;
 	mutable Ui::Text::String replyToName, replyToText;
 	mutable int replyToVersion = 0;
@@ -158,8 +192,10 @@ struct HistoryMessageMarkupButton {
 		Default,
 		Url,
 		Callback,
+		CallbackWithPassword,
 		RequestPhone,
 		RequestLocation,
+		RequestPoll,
 		SwitchInline,
 		SwitchInlineSame,
 		Game,
@@ -175,6 +211,7 @@ struct HistoryMessageMarkupButton {
 		int32 buttonId = 0);
 
 	static HistoryMessageMarkupButton *Get(
+		not_null<Data::Session*> owner,
 		FullMsgId itemId,
 		int row,
 		int column);
@@ -202,9 +239,6 @@ struct HistoryMessageReplyMarkup : public RuntimeComponent<HistoryMessageReplyMa
 
 	std::unique_ptr<ReplyKeyboard> inlineKeyboard;
 
-	// If >= 0 it holds the y coord of the inlineKeyboard before the last edition.
-	int oldTop = -1;
-
 private:
 	void createFromButtonRows(const QVector<MTPKeyboardButtonRow> &v);
 
@@ -212,11 +246,13 @@ private:
 
 class ReplyMarkupClickHandler : public LeftButtonClickHandler {
 public:
-	ReplyMarkupClickHandler(int row, int column, FullMsgId context);
+	ReplyMarkupClickHandler(
+		not_null<Data::Session*> owner,
+		int row,
+		int column,
+		FullMsgId context);
 
-	QString tooltip() const override {
-		return _fullDisplayed ? QString() : buttonText();
-	}
+	QString tooltip() const override;
 
 	void setFullDisplayed(bool full) {
 		_fullDisplayed = full;
@@ -232,6 +268,8 @@ public:
 	// than the one was used when constructing the handler, but not a big deal.
 	const HistoryMessageMarkupButton *getButton() const;
 
+	const HistoryMessageMarkupButton *getUrlButton() const;
+
 	// We hold only FullMsgId, not HistoryItem*, because all click handlers
 	// are activated async and the item may be already destroyed.
 	void setMessageId(const FullMsgId &msgId) {
@@ -242,6 +280,7 @@ protected:
 	void onClickImpl() const override;
 
 private:
+	const not_null<Data::Session*> _owner;
 	FullMsgId _itemId;
 	int _row = 0;
 	int _column = 0;

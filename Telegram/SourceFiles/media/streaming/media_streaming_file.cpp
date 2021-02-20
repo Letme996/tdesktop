@@ -16,6 +16,7 @@ namespace Streaming {
 namespace {
 
 constexpr auto kMaxSingleReadAmount = 8 * 1024 * 1024;
+constexpr auto kMaxQueuedPackets = 1024;
 
 } // namespace
 
@@ -27,6 +28,8 @@ File::Context::Context(
 , _size(reader->size()) {
 }
 
+File::Context::~Context() = default;
+
 int File::Context::Read(void *opaque, uint8_t *buffer, int bufferSize) {
 	return static_cast<Context*>(opaque)->read(
 		bytes::make_span(buffer, bufferSize));
@@ -37,8 +40,8 @@ int64_t File::Context::Seek(void *opaque, int64_t offset, int whence) {
 }
 
 int File::Context::read(bytes::span buffer) {
-	const auto amount = std::min(size_type(_size - _offset), buffer.size());
-	Assert(amount >= 0);
+	Assert(_size >= _offset);
+	const auto amount = std::min(std::size_t(_size - _offset), buffer.size());
 
 	if (unroll()) {
 		return -1;
@@ -51,8 +54,22 @@ int File::Context::read(bytes::span buffer) {
 	}
 
 	buffer = buffer.subspan(0, amount);
-	while (!_reader->fill(_offset, buffer, &_semaphore)) {
-		_delegate->fileWaitingForData();
+	while (true) {
+		const auto result = _reader->fill(_offset, buffer, &_semaphore);
+		if (result == Reader::FillState::Success) {
+			break;
+		} else if (result == Reader::FillState::WaitingRemote) {
+			// Perhaps for the correct sleeping in case of enough packets
+			// being read already we require SleepPolicy::Allowed here.
+			// Otherwise if we wait for the remote frequently and
+			// _queuedPackets never get to kMaxQueuedPackets and we don't call
+			// processQueuedPackets(SleepPolicy::Allowed) ever.
+			//
+			// But right now we can't simply pass SleepPolicy::Allowed here,
+			// it freezes because of two _semaphore.acquire one after another.
+			processQueuedPackets(SleepPolicy::Disallowed);
+			_delegate->fileWaitingForData();
+		}
 		_semaphore.acquire();
 		if (_interrupted) {
 			return -1;
@@ -131,6 +148,10 @@ Stream File::Context::initStream(
 
 	const auto info = format->streams[index];
 	if (type == AVMEDIA_TYPE_VIDEO) {
+		if (info->disposition & AV_DISPOSITION_ATTACHED_PIC) {
+			// ignore cover streams
+			return Stream();
+		}
 		result.rotation = FFmpeg::ReadRotationFromMetadata(info);
 		result.aspect = FFmpeg::ValidateAspectRatio(info->sample_aspect_ratio);
 	} else if (type == AVMEDIA_TYPE_AUDIO) {
@@ -154,10 +175,10 @@ Stream File::Context::initStream(
 	result.duration = (info->duration != AV_NOPTS_VALUE)
 		? FFmpeg::PtsToTime(info->duration, result.timeBase)
 		: FFmpeg::PtsToTime(format->duration, FFmpeg::kUniversalTimeBase);
-	if (result.duration <= 0) {
-		result.codec = nullptr;
-	} else if (result.duration == kTimeUnknown) {
+	if (result.duration == kTimeUnknown) {
 		result.duration = kDurationUnavailable;
+	} else if (result.duration <= 0) {
+		result.codec = nullptr;
 	} else {
 		++result.duration;
 		if (result.duration > kDurationMax) {
@@ -207,7 +228,7 @@ void File::Context::seekToPosition(
 	return logFatal(qstr("av_seek_frame"), error);
 }
 
-base::variant<FFmpeg::Packet, FFmpeg::AvErrorWrap> File::Context::readPacket() {
+std::variant<FFmpeg::Packet, FFmpeg::AvErrorWrap> File::Context::readPacket() {
 	auto error = FFmpeg::AvErrorWrap();
 
 	auto result = FFmpeg::Packet();
@@ -215,7 +236,7 @@ base::variant<FFmpeg::Packet, FFmpeg::AvErrorWrap> File::Context::readPacket() {
 	if (unroll()) {
 		return FFmpeg::AvErrorWrap();
 	} else if (!error) {
-		return std::move(result);
+		return result;
 	} else if (error.code() != AVERROR_EOF) {
 		logFatal(qstr("av_read_frame"), error);
 	}
@@ -262,6 +283,13 @@ void File::Context::start(crl::time position) {
 		return;
 	}
 
+	if (video.codec) {
+		_queuedPackets[video.index].reserve(kMaxQueuedPackets);
+	}
+	if (audio.codec) {
+		_queuedPackets[audio.index].reserve(kMaxQueuedPackets);
+	}
+
 	const auto header = _reader->headerSize();
 	if (!_delegate->fileReady(header, std::move(video), std::move(audio))) {
 		return fail(Error::OpenFailed);
@@ -284,25 +312,30 @@ void File::Context::readNextPacket() {
 	auto result = readPacket();
 	if (unroll()) {
 		return;
-	} else if (const auto packet = base::get_if<FFmpeg::Packet>(&result)) {
-		const auto more = _delegate->fileProcessPacket(std::move(*packet));
-		if (!more) {
-			do {
-				_reader->startSleep(&_semaphore);
-				_semaphore.acquire();
-				_reader->stopSleep();
-			} while (!unroll() && !_delegate->fileReadMore());
+	} else if (const auto packet = std::get_if<FFmpeg::Packet>(&result)) {
+		const auto index = packet->fields().stream_index;
+		const auto i = _queuedPackets.find(index);
+		if (i == end(_queuedPackets)) {
+			return;
 		}
+		i->second.push_back(std::move(*packet));
+		if (i->second.size() == kMaxQueuedPackets) {
+			processQueuedPackets(SleepPolicy::Allowed);
+		}
+		Assert(i->second.size() < kMaxQueuedPackets);
 	} else {
 		// Still trying to read by drain.
-		Assert(result.is<FFmpeg::AvErrorWrap>());
-		Assert(result.get<FFmpeg::AvErrorWrap>().code() == AVERROR_EOF);
-		handleEndOfFile();
+		Assert(v::is<FFmpeg::AvErrorWrap>(result));
+		Assert(v::get<FFmpeg::AvErrorWrap>(result).code() == AVERROR_EOF);
+		processQueuedPackets(SleepPolicy::Allowed);
+		if (!finished()) {
+			handleEndOfFile();
+		}
 	}
 }
 
 void File::Context::handleEndOfFile() {
-	const auto more = _delegate->fileProcessPacket(FFmpeg::Packet());
+	_delegate->fileProcessEndOfFile();
 	if (_delegate->fileReadMore()) {
 		_readTillEnd = false;
 		auto error = FFmpeg::AvErrorWrap(av_seek_frame(
@@ -313,8 +346,24 @@ void File::Context::handleEndOfFile() {
 		if (error) {
 			logFatal(qstr("av_seek_frame"));
 		}
+
+		// If we loaded a file till the end then we think it is fully cached,
+		// assume we finished loading and don't want to keep all other
+		// download tasks throttled because of an active streaming.
+		_reader->tryRemoveLoaderAsync();
 	} else {
 		_readTillEnd = true;
+	}
+}
+
+void File::Context::processQueuedPackets(SleepPolicy policy) {
+	const auto more = _delegate->fileProcessPackets(_queuedPackets);
+	if (!more && policy == SleepPolicy::Allowed) {
+		do {
+			_reader->startSleep(&_semaphore);
+			_semaphore.acquire();
+			_reader->stopSleep();
+		} while (!unroll() && !_delegate->fileReadMore());
 	}
 }
 
@@ -344,15 +393,17 @@ void File::Context::fail(Error error) {
 	_delegate->fileError(error);
 }
 
-File::Context::~Context() = default;
-
 bool File::Context::finished() const {
 	return unroll() || _readTillEnd;
 }
 
-File::File(
-	not_null<Data::Session*> owner,
-	std::shared_ptr<Reader> reader)
+void File::Context::stopStreamingAsync() {
+	// If we finished loading we don't want to keep all other
+	// download tasks throttled because of an active streaming.
+	_reader->stopStreamingAsync();
+}
+
+File::File(std::shared_ptr<Reader> reader)
 : _reader(std::move(reader)) {
 }
 
@@ -365,6 +416,9 @@ void File::start(not_null<FileDelegate*> delegate, crl::time position) {
 		context->start(position);
 		while (!context->finished()) {
 			context->readNextPacket();
+		}
+		if (!context->interrupted()) {
+			context->stopStreamingAsync();
 		}
 	});
 }
@@ -386,6 +440,10 @@ void File::stop(bool stillActive) {
 
 bool File::isRemoteLoader() const {
 	return _reader->isRemoteLoader();
+}
+
+void File::setLoaderPriority(int priority) {
+	_reader->setLoaderPriority(priority);
 }
 
 File::~File() {

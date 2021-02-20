@@ -33,16 +33,24 @@ public:
 	Key(not_null<PeerData*> peer);
 	//Key(not_null<Data::Feed*> feed); // #feed
 	Key(Settings::Tag settings);
+	Key(not_null<PollData*> poll, FullMsgId contextId);
 
 	PeerData *peer() const;
 	//Data::Feed *feed() const; // #feed
 	UserData *settingsSelf() const;
+	PollData *poll() const;
+	FullMsgId pollContextId() const;
 
 private:
-	base::variant<
+	struct PollKey {
+		not_null<PollData*> poll;
+		FullMsgId contextId;
+	};
+	std::variant<
 		not_null<PeerData*>,
 		//not_null<Data::Feed*>, // #feed
-		Settings::Tag> _value;
+		Settings::Tag,
+		PollKey> _value;
 
 };
 
@@ -60,6 +68,7 @@ public:
 		Members,
 		//Channels, // #feed
 		Settings,
+		PollResults,
 	};
 	using SettingsType = ::Settings::Type;
 	using MediaType = Storage::SharedMediaType;
@@ -105,13 +114,17 @@ public:
 	virtual PeerData *migrated() const = 0;
 	virtual Section section() const = 0;
 
-	PeerId peerId() const;
+	PeerData *peer() const;
 	PeerId migratedPeerId() const;
 	//Data::Feed *feed() const { // #feed
 	//	return key().feed();
 	//}
 	UserData *settingsSelf() const {
 		return key().settingsSelf();
+	}
+	PollData *poll() const;
+	FullMsgId pollContextId() const {
+		return key().pollContextId();
 	}
 
 	virtual void setSearchEnabledByContent(bool enabled) {
@@ -123,10 +136,16 @@ public:
 	virtual rpl::producer<QString> mediaSourceQueryValue() const;
 
 	void showSection(
-		Window::SectionMemento &&memento,
+		std::shared_ptr<Window::SectionMemento> memento,
 		const Window::SectionShow &params = Window::SectionShow()) override;
 	void showBackFromStack(
 		const Window::SectionShow &params = Window::SectionShow()) override;
+
+	void showPeerHistory(
+		PeerId peerId,
+		const Window::SectionShow &params = Window::SectionShow::Way::ClearStack,
+		MsgId msgId = ShowAtUnreadMsgId) override;
+
 	not_null<Window::SessionController*> parentController() override {
 		return _parent;
 	}
@@ -183,7 +202,7 @@ public:
 	void saveSearchState(not_null<ContentMemento*> memento);
 
 	void showSection(
-		Window::SectionMemento &&memento,
+		std::shared_ptr<Window::SectionMemento> memento,
 		const Window::SectionShow &params = Window::SectionShow()) override;
 	void showBackFromStack(
 		const Window::SectionShow &params = Window::SectionShow()) override;

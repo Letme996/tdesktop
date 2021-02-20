@@ -13,21 +13,38 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/history_view_element.h"
 #include "history/view/history_view_cursor_state.h"
 #include "calls/calls_instance.h"
-#include "ui/text_options.h"
+#include "ui/text/text_options.h"
+#include "ui/text/text_utilities.h"
+#include "ui/text/format_values.h"
 #include "ui/effects/animations.h"
 #include "ui/effects/radial_animation.h"
 #include "ui/effects/ripple_animation.h"
+#include "ui/effects/fireworks_animation.h"
+#include "ui/toast/toast.h"
 #include "data/data_media_types.h"
 #include "data/data_poll.h"
+#include "data/data_user.h"
 #include "data/data_session.h"
-#include "layout.h"
+#include "base/unixtime.h"
+#include "base/timer.h"
 #include "main/main_session.h"
+#include "layout.h" // FullSelection
 #include "apiwrap.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 #include "styles/style_widgets.h"
+#include "styles/style_window.h"
 
 namespace HistoryView {
 namespace {
+
+constexpr auto kShowRecentVotersCount = 3;
+constexpr auto kRotateSegments = 8;
+constexpr auto kRotateAmplitude = 3.;
+constexpr auto kScaleSegments = 2;
+constexpr auto kScaleAmplitude = 0.03;
+constexpr auto kRollDuration = crl::time(400);
+constexpr auto kLargestRadialDuration = 30 * crl::time(1000);
+constexpr auto kCriticalCloseDuration = 5 * crl::time(1000);
 
 struct PercentCounterItem {
 	int index = 0;
@@ -112,6 +129,8 @@ struct Poll::AnswerAnimation {
 	anim::value percent;
 	anim::value filling;
 	anim::value opacity;
+	bool chosen = false;
+	bool correct = false;
 };
 
 struct Poll::AnswersAnimation {
@@ -132,7 +151,7 @@ struct Poll::SendingAnimation {
 struct Poll::Answer {
 	Answer();
 
-	void fillText(const PollAnswer &original);
+	void fillData(not_null<PollData*> poll, const PollAnswer &original);
 
 	Ui::Text::String text;
 	QByteArray option;
@@ -142,8 +161,21 @@ struct Poll::Answer {
 	float64 filling = 0.;
 	QString votesPercentString;
 	bool chosen = false;
+	bool correct = false;
+	bool selected = false;
 	ClickHandlerPtr handler;
+	Ui::Animations::Simple selectedAnimation;
 	mutable std::unique_ptr<Ui::RippleAnimation> ripple;
+};
+
+struct Poll::CloseInformation {
+	CloseInformation(TimeId date, TimeId period, Fn<void()> repaint);
+
+	crl::time start = 0;
+	crl::time finish = 0;
+	crl::time duration = 0;
+	base::Timer timer;
+	Ui::Animations::Basic radial;
 };
 
 template <typename Callback>
@@ -159,7 +191,11 @@ Poll::SendingAnimation::SendingAnimation(
 Poll::Answer::Answer() : text(st::msgMinWidth / 2) {
 }
 
-void Poll::Answer::fillText(const PollAnswer &original) {
+void Poll::Answer::fillData(
+		not_null<PollData*> poll,
+		const PollAnswer &original) {
+	chosen = original.chosen;
+	correct = poll->quiz() ? original.correct : chosen;
 	if (!text.isEmpty() && text.toString() == original.text) {
 		return;
 	}
@@ -169,12 +205,30 @@ void Poll::Answer::fillText(const PollAnswer &original) {
 		Ui::WebpageTextTitleOptions());
 }
 
+Poll::CloseInformation::CloseInformation(
+	TimeId date,
+	TimeId period,
+	Fn<void()> repaint)
+: duration(period * crl::time(1000))
+, timer(std::move(repaint)) {
+	const auto left = std::clamp(date - base::unixtime::now(), 0, period);
+	finish = crl::now() + left * crl::time(1000);
+}
+
 Poll::Poll(
 	not_null<Element*> parent,
 	not_null<PollData*> poll)
 : Media(parent)
 , _poll(poll)
-, _question(st::msgMinWidth / 2) {
+, _question(st::msgMinWidth / 2)
+, _showResultsLink(
+	std::make_shared<LambdaClickHandler>(crl::guard(
+		this,
+		[=] { showResults(); })))
+, _sendVotesLink(
+	std::make_shared<LambdaClickHandler>(crl::guard(
+		this,
+		[=] { sendMultiOptions(); }))) {
 	history()->owner().registerPollView(_poll, _parent);
 }
 
@@ -202,13 +256,17 @@ QSize Poll::countOptimalSize() {
 			+ st::historyPollAnswerPadding.bottom();
 	}), 0);
 
+	const auto bottomButtonHeight = inlineFooter()
+		? 0
+		: st::historyPollBottomButtonSkip;
 	auto minHeight = st::historyPollQuestionTop
 		+ _question.minHeight()
 		+ st::historyPollSubtitleSkip
 		+ st::msgDateFont->height
 		+ st::historyPollAnswersSkip
 		+ answersHeight
-		+ st::msgPadding.bottom()
+		+ st::historyPollTotalVotesSkip
+		+ bottomButtonHeight
 		+ st::msgDateFont->height
 		+ st::msgPadding.bottom();
 	if (!isBubbleTop()) {
@@ -218,11 +276,26 @@ QSize Poll::countOptimalSize() {
 }
 
 bool Poll::showVotes() const {
-	return _voted || _closed;
+	return _voted || (_flags & PollData::Flag::Closed);
 }
 
 bool Poll::canVote() const {
 	return !showVotes() && IsServerMsgId(_parent->data()->id);
+}
+
+bool Poll::canSendVotes() const {
+	return canVote() && _hasSelected;
+}
+
+bool Poll::showVotersCount() const {
+	return showVotes()
+		? (!_totalVotes || !(_flags & PollData::Flag::PublicVotes))
+		: !(_flags & PollData::Flag::MultiChoice);
+}
+
+bool Poll::inlineFooter() const {
+	return !(_flags
+		& (PollData::Flag::PublicVotes | PollData::Flag::MultiChoice));
 }
 
 int Poll::countAnswerTop(
@@ -278,6 +351,9 @@ QSize Poll::countCurrentSize(int newWidth) {
 		return countAnswerHeight(answer, innerWidth);
 	}), 0);
 
+	const auto bottomButtonHeight = inlineFooter()
+		? 0
+		: st::historyPollBottomButtonSkip;
 	auto newHeight = st::historyPollQuestionTop
 		+ _question.countHeight(innerWidth)
 		+ st::historyPollSubtitleSkip
@@ -285,6 +361,7 @@ QSize Poll::countCurrentSize(int newWidth) {
 		+ st::historyPollAnswersSkip
 		+ answersHeight
 		+ st::historyPollTotalVotesSkip
+		+ bottomButtonHeight
 		+ st::msgDateFont->height
 		+ st::msgPadding.bottom();
 	if (!isBubbleTop()) {
@@ -297,28 +374,139 @@ void Poll::updateTexts() {
 	if (_pollVersion == _poll->version) {
 		return;
 	}
+	const auto first = !_pollVersion;
 	_pollVersion = _poll->version;
 
 	const auto willStartAnimation = checkAnimationStart();
+	const auto voted = _voted;
 
 	if (_question.toString() != _poll->question) {
+		auto options = Ui::WebpageTextTitleOptions();
+		options.maxw = options.maxh = 0;
 		_question.setText(
 			st::historyPollQuestionStyle,
 			_poll->question,
-			Ui::WebpageTextTitleOptions());
+			options);
 	}
-	if (_closed != _poll->closed || _subtitle.isEmpty()) {
-		_closed = _poll->closed;
+	if (_flags != _poll->flags() || _subtitle.isEmpty()) {
+		using Flag = PollData::Flag;
+		_flags = _poll->flags();
 		_subtitle.setText(
 			st::msgDateTextStyle,
-			_closed ? tr::lng_polls_closed(tr::now) : tr::lng_polls_anonymous(tr::now));
+			((_flags & Flag::Closed)
+				? tr::lng_polls_closed(tr::now)
+				: (_flags & Flag::Quiz)
+				? ((_flags & Flag::PublicVotes)
+					? tr::lng_polls_public_quiz(tr::now)
+					: tr::lng_polls_anonymous_quiz(tr::now))
+				: ((_flags & Flag::PublicVotes)
+					? tr::lng_polls_public(tr::now)
+					: tr::lng_polls_anonymous(tr::now))));
 	}
-
+	updateRecentVoters();
 	updateAnswers();
 	updateVotes();
 
 	if (willStartAnimation) {
 		startAnswersAnimation();
+		if (!voted) {
+			checkQuizAnswered();
+		}
+	}
+	solutionToggled(
+		_solutionShown,
+		first ? anim::type::instant : anim::type::normal);
+}
+
+void Poll::checkQuizAnswered() {
+	if (!_voted || !_votedFromHere || !_poll->quiz() || anim::Disabled()) {
+		return;
+	}
+	const auto i = ranges::find(_answers, true, &Answer::chosen);
+	if (i == end(_answers)) {
+		return;
+	}
+	if (i->correct) {
+		_fireworksAnimation = std::make_unique<Ui::FireworksAnimation>(
+			[=] { history()->owner().requestViewRepaint(_parent); });
+	} else {
+		_wrongAnswerAnimation.start(
+			[=] { history()->owner().requestViewRepaint(_parent); },
+			0.,
+			1.,
+			kRollDuration,
+			anim::linear);
+		showSolution();
+	}
+}
+
+void Poll::showSolution() const {
+	if (!_poll->solution.text.isEmpty()) {
+		solutionToggled(true);
+		_parent->delegate()->elementShowTooltip(
+			_poll->solution,
+			crl::guard(this, [=] { solutionToggled(false); }));
+	}
+}
+
+void Poll::solutionToggled(
+		bool solutionShown,
+		anim::type animated) const {
+	_solutionShown = solutionShown;
+	const auto visible = canShowSolution() && !_solutionShown;
+	if (_solutionButtonVisible == visible) {
+		if (animated == anim::type::instant
+			&& _solutionButtonAnimation.animating()) {
+			_solutionButtonAnimation.stop();
+			history()->owner().requestViewRepaint(_parent);
+		}
+		return;
+	}
+	_solutionButtonVisible = visible;
+	history()->owner().notifyViewLayoutChange(_parent);
+	if (animated == anim::type::instant) {
+		_solutionButtonAnimation.stop();
+		history()->owner().requestViewRepaint(_parent);
+	} else {
+		_solutionButtonAnimation.start(
+			[=] { history()->owner().requestViewRepaint(_parent); },
+			visible ? 0. : 1.,
+			visible ? 1. : 0.,
+			st::fadeWrapDuration);
+	}
+}
+
+void Poll::updateRecentVoters() {
+	auto &&sliced = ranges::view::all(
+		_poll->recentVoters
+	) | ranges::view::take(kShowRecentVotersCount);
+	const auto changed = !ranges::equal(
+		_recentVoters,
+		sliced,
+		ranges::equal_to(),
+		&RecentVoter::user);
+	if (changed) {
+		auto updated = ranges::view::all(
+			sliced
+		) | ranges::views::transform([](not_null<UserData*> user) {
+			return RecentVoter{ user };
+		}) | ranges::to_vector;
+		const auto has = hasHeavyPart();
+		if (has) {
+			for (auto &voter : updated) {
+				const auto i = ranges::find(
+					_recentVoters,
+					voter.user,
+					&RecentVoter::user);
+				if (i != end(_recentVoters)) {
+					voter.userpic = std::move(i->userpic);
+				}
+			}
+		}
+		_recentVoters = std::move(updated);
+		if (has && !hasHeavyPart()) {
+			_parent->checkHeavyPart();
+		}
 	}
 }
 
@@ -332,16 +520,16 @@ void Poll::updateAnswers() {
 	if (!changed) {
 		auto &&answers = ranges::view::zip(_answers, _poll->answers);
 		for (auto &&[answer, original] : answers) {
-			answer.fillText(original);
+			answer.fillData(_poll, original);
 		}
 		return;
 	}
 	_answers = ranges::view::all(
 		_poll->answers
-	) | ranges::view::transform([](const PollAnswer &answer) {
+	) | ranges::view::transform([&](const PollAnswer &answer) {
 		auto result = Answer();
 		result.option = answer.option;
-		result.fillText(answer);
+		result.fillData(_poll, answer);
 		return result;
 	}) | ranges::to_vector;
 
@@ -353,36 +541,101 @@ void Poll::updateAnswers() {
 }
 
 ClickHandlerPtr Poll::createAnswerClickHandler(
-		const Answer &answer) const {
+		const Answer &answer) {
 	const auto option = answer.option;
-	const auto itemId = _parent->data()->fullId();
-	return std::make_shared<LambdaClickHandler>([=] {
-		history()->session().api().sendPollVotes(itemId, { option });
-	});
+	if (_flags & PollData::Flag::MultiChoice) {
+		return std::make_shared<LambdaClickHandler>(crl::guard(this, [=] {
+			toggleMultiOption(option);
+		}));
+	}
+	return std::make_shared<LambdaClickHandler>(crl::guard(this, [=] {
+		_votedFromHere = true;
+		history()->session().api().sendPollVotes(
+			_parent->data()->fullId(),
+			{ option });
+	}));
+}
+
+void Poll::toggleMultiOption(const QByteArray &option) {
+	const auto i = ranges::find(
+		_answers,
+		option,
+		&Answer::option);
+	if (i != end(_answers)) {
+		const auto selected = i->selected;
+		i->selected = !selected;
+		i->selectedAnimation.start(
+			[=] { history()->owner().requestViewRepaint(_parent); },
+			selected ? 1. : 0.,
+			selected ? 0. : 1.,
+			st::defaultCheck.duration);
+		if (selected) {
+			const auto j = ranges::find(
+				_answers,
+				true,
+				&Answer::selected);
+			_hasSelected = (j != end(_answers));
+		} else {
+			_hasSelected = true;
+		}
+		history()->owner().requestViewRepaint(_parent);
+	}
+}
+
+void Poll::sendMultiOptions() {
+	auto chosen = _answers | ranges::view::filter(
+		&Answer::selected
+	) | ranges::view::transform(
+		&Answer::option
+	) | ranges::to_vector;
+	if (!chosen.empty()) {
+		_votedFromHere = true;
+		history()->session().api().sendPollVotes(
+			_parent->data()->fullId(),
+			std::move(chosen));
+	}
+}
+
+void Poll::showResults() {
+	_parent->delegate()->elementShowPollResults(
+		_poll,
+		_parent->data()->fullId());
 }
 
 void Poll::updateVotes() {
-	_voted = _poll->voted();
+	const auto voted = _poll->voted();
+	if (_voted != voted) {
+		_voted = voted;
+		if (_voted) {
+			for (auto &answer : _answers) {
+				answer.selected = false;
+			}
+		} else {
+			_votedFromHere = false;
+		}
+	}
 	updateAnswerVotes();
 	updateTotalVotes();
 }
 
 void Poll::checkSendingAnimation() const {
-	const auto &sending = _poll->sendingVote;
-	if (sending.isEmpty() == !_sendingAnimation) {
+	const auto &sending = _poll->sendingVotes;
+	const auto sendingRadial = (sending.size() == 1)
+		&& !(_flags & PollData::Flag::MultiChoice);
+	if (sendingRadial == (_sendingAnimation != nullptr)) {
 		if (_sendingAnimation) {
-			_sendingAnimation->option = sending;
+			_sendingAnimation->option = sending.front();
 		}
 		return;
 	}
-	if (sending.isEmpty()) {
+	if (!sendingRadial) {
 		if (!_answersAnimation) {
 			_sendingAnimation = nullptr;
 		}
 		return;
 	}
 	_sendingAnimation = std::make_unique<SendingAnimation>(
-		sending,
+		sending.front(),
 		[=] { radialAnimationCallback(); });
 	_sendingAnimation->animation.start();
 }
@@ -392,9 +645,17 @@ void Poll::updateTotalVotes() {
 		return;
 	}
 	_totalVotes = _poll->totalVoters;
+	const auto quiz = _poll->quiz();
 	const auto string = !_totalVotes
-		? tr::lng_polls_votes_none(tr::now)
-		: tr::lng_polls_votes_count(tr::now, lt_count_short, _totalVotes);
+		? (quiz
+			? tr::lng_polls_answers_none
+			: tr::lng_polls_votes_none)(tr::now)
+		: (quiz
+			? tr::lng_polls_answers_count
+			: tr::lng_polls_votes_count)(
+				tr::now,
+				lt_count_short,
+				_totalVotes);
 	_totalVotesLabel.setText(st::msgDateTextStyle, string);
 }
 
@@ -483,6 +744,9 @@ void Poll::draw(Painter &p, const QRect &r, TextSelection selection, crl::time m
 
 	p.setPen(regular);
 	_subtitle.drawLeftElided(p, padding.left(), tshift, paintw, width());
+	paintRecentVoters(p, padding.left() + _subtitle.maxWidth(), tshift, selection);
+	paintCloseByTimer(p, padding.left() + paintw, tshift, selection);
+	paintShowSolution(p, padding.left() + paintw, tshift, selection);
 	tshift += st::msgDateFont->height + st::historyPollAnswersSkip;
 
 	const auto progress = _answersAnimation
@@ -501,7 +765,9 @@ void Poll::draw(Painter &p, const QRect &r, TextSelection selection, crl::time m
 			: nullptr;
 		if (animation) {
 			animation->percent.update(progress, anim::linear);
-			animation->filling.update(progress, anim::linear);
+			animation->filling.update(
+				progress,
+				showVotes() ? anim::easeOutCirc : anim::linear);
 			animation->opacity.update(progress, anim::linear);
 		}
 		const auto height = paintAnswer(
@@ -515,23 +781,80 @@ void Poll::draw(Painter &p, const QRect &r, TextSelection selection, crl::time m
 			selection);
 		tshift += height;
 	}
-	if (!_totalVotesLabel.isEmpty()) {
+	if (!inlineFooter()) {
+		paintBottom(p, padding.left(), tshift, paintw, selection);
+	} else if (!_totalVotesLabel.isEmpty()) {
 		tshift += st::msgPadding.bottom();
+		paintInlineFooter(p, padding.left(), tshift, paintw, selection);
+	}
+}
+
+void Poll::paintInlineFooter(
+		Painter &p,
+		int left,
+		int top,
+		int paintw,
+		TextSelection selection) const {
+	const auto selected = (selection == FullSelection);
+	const auto outbg = _parent->hasOutLayout();
+	const auto &regular = selected ? (outbg ? st::msgOutDateFgSelected : st::msgInDateFgSelected) : (outbg ? st::msgOutDateFg : st::msgInDateFg);
+	p.setPen(regular);
+	_totalVotesLabel.drawLeftElided(
+		p,
+		left,
+		top,
+		std::min(
+			_totalVotesLabel.maxWidth(),
+			paintw - _parent->infoWidth()),
+		width());
+}
+
+void Poll::paintBottom(
+		Painter &p,
+		int left,
+		int top,
+		int paintw,
+		TextSelection selection) const {
+	const auto stringtop = top + st::msgPadding.bottom() + st::historyPollBottomButtonTop;
+	const auto selected = (selection == FullSelection);
+	const auto outbg = _parent->hasOutLayout();
+	const auto &regular = selected ? (outbg ? st::msgOutDateFgSelected : st::msgInDateFgSelected) : (outbg ? st::msgOutDateFg : st::msgInDateFg);
+	if (showVotersCount()) {
 		p.setPen(regular);
-		_totalVotesLabel.drawLeftElided(
-			p,
-			padding.left(),
-			tshift,
-			std::min(
-				_totalVotesLabel.maxWidth(),
-				paintw - _parent->infoWidth()),
-			width());
+		_totalVotesLabel.draw(p, left, stringtop, paintw, style::al_top);
+	} else {
+		const auto link = showVotes()
+			? _showResultsLink
+			: canSendVotes()
+			? _sendVotesLink
+			: nullptr;
+		if (_linkRipple) {
+			const auto linkHeight = bottomButtonHeight();
+			p.setOpacity(st::historyPollRippleOpacity);
+			_linkRipple->paint(p, left - st::msgPadding.left(), height() - linkHeight, width());
+			if (_linkRipple->empty()) {
+				_linkRipple.reset();
+			}
+			p.setOpacity(1.);
+		}
+		p.setFont(st::semiboldFont);
+		if (!link) {
+			p.setPen(regular);
+		} else {
+			p.setPen(outbg ? (selected ? st::msgFileThumbLinkOutFgSelected : st::msgFileThumbLinkOutFg) : (selected ? st::msgFileThumbLinkInFgSelected : st::msgFileThumbLinkInFg));
+		}
+		const auto string = showVotes()
+			? tr::lng_polls_view_results(tr::now, Ui::Text::Upper)
+			: tr::lng_polls_submit_votes(tr::now, Ui::Text::Upper);
+		const auto stringw = st::semiboldFont->width(string);
+		p.drawTextLeft(left + (paintw - stringw) / 2, stringtop, width(), string, stringw);
 	}
 }
 
 void Poll::resetAnswersAnimation() const {
 	_answersAnimation = nullptr;
-	if (_poll->sendingVote.isEmpty()) {
+	if (_poll->sendingVotes.size() != 1
+		|| (_flags & PollData::Flag::MultiChoice)) {
 		_sendingAnimation = nullptr;
 	}
 }
@@ -539,6 +862,153 @@ void Poll::resetAnswersAnimation() const {
 void Poll::radialAnimationCallback() const {
 	if (!anim::Disabled()) {
 		history()->owner().requestViewRepaint(_parent);
+	}
+}
+
+void Poll::paintRecentVoters(
+		Painter &p,
+		int left,
+		int top,
+		TextSelection selection) const {
+	const auto count = int(_recentVoters.size());
+	if (!count) {
+		return;
+	}
+	auto x = left
+		+ st::historyPollRecentVotersSkip
+		+ (count - 1) * st::historyPollRecentVoterSkip;
+	auto y = top;
+	const auto size = st::historyPollRecentVoterSize;
+	const auto outbg = _parent->hasOutLayout();
+	const auto selected = (selection == FullSelection);
+	auto pen = (selected
+		? (outbg ? st::msgOutBgSelected : st::msgInBgSelected)
+		: (outbg ? st::msgOutBg : st::msgInBg))->p;
+	pen.setWidth(st::lineWidth);
+
+	auto created = false;
+	for (auto &recent : _recentVoters) {
+		const auto was = (recent.userpic != nullptr);
+		recent.user->paintUserpic(p, recent.userpic, x, y, size);
+		if (!was && recent.userpic) {
+			created = true;
+		}
+		p.setPen(pen);
+		p.setBrush(Qt::NoBrush);
+		PainterHighQualityEnabler hq(p);
+		p.drawEllipse(x, y, size, size);
+		x -= st::historyPollRecentVoterSkip;
+	}
+	if (created) {
+		history()->owner().registerHeavyViewPart(_parent);
+	}
+}
+
+void Poll::paintCloseByTimer(
+		Painter &p,
+		int right,
+		int top,
+		TextSelection selection) const {
+	if (!canVote() || _poll->closeDate <= 0 || _poll->closePeriod <= 0) {
+		_close = nullptr;
+		return;
+	}
+	if (!_close) {
+		_close = std::make_unique<CloseInformation>(
+			_poll->closeDate,
+			_poll->closePeriod,
+			[=] { history()->owner().requestViewRepaint(_parent); });
+	}
+	const auto now = crl::now();
+	const auto left = std::max(_close->finish - now, crl::time(0));
+	const auto radial = std::min(_close->duration, kLargestRadialDuration);
+	if (!left) {
+		_close->radial.stop();
+	} else if (left < radial && !anim::Disabled()) {
+		if (!_close->radial.animating()) {
+			_close->radial.init([=] {
+				history()->owner().requestViewRepaint(_parent);
+			});
+			_close->radial.start();
+		}
+	} else {
+		_close->radial.stop();
+	}
+	const auto time = Ui::FormatDurationText(int(std::ceil(left / 1000.)));
+	const auto outbg = _parent->hasOutLayout();
+	const auto selected = (selection == FullSelection);
+	const auto &icon = selected
+		? (outbg
+			? st::historyQuizTimerOutSelected
+			: st::historyQuizTimerInSelected)
+		: (outbg ? st::historyQuizTimerOut : st::historyQuizTimerIn);
+	const auto x = right - icon.width();
+	const auto y = top
+		+ (st::normalFont->height - icon.height()) / 2
+		- st::lineWidth;
+	const auto &regular = (left < kCriticalCloseDuration)
+		? st::boxTextFgError
+		: selected
+		? (outbg ? st::msgOutDateFgSelected : st::msgInDateFgSelected)
+		: (outbg ? st::msgOutDateFg : st::msgInDateFg);
+	p.setPen(regular);
+	const auto timeWidth = st::normalFont->width(time);
+	p.drawTextLeft(x - timeWidth, top, width(), time, timeWidth);
+	if (left < radial) {
+		auto hq = PainterHighQualityEnabler(p);
+		const auto part = std::max(
+			left / float64(radial),
+			1. / FullArcLength);
+		const auto length = int(std::round(FullArcLength * part));
+		auto pen = regular->p;
+		pen.setWidth(st::historyPollRadio.thickness);
+		pen.setCapStyle(Qt::RoundCap);
+		p.setPen(pen);
+		const auto size = icon.width() / 2;
+		const auto left = (x + (icon.width() - size) / 2);
+		const auto top = (y + (icon.height() - size) / 2) + st::lineWidth;
+		p.drawArc(left, top, size, size, (FullArcLength / 4), length);
+	} else {
+		icon.paint(p, x, y, width());
+	}
+
+	if (left > (anim::Disabled() ? 0 : (radial - 1))) {
+		const auto next = (left % 1000);
+		_close->timer.callOnce((next ? next : 1000) + 1);
+	}
+}
+
+void Poll::paintShowSolution(
+		Painter &p,
+		int right,
+		int top,
+		TextSelection selection) const {
+	const auto shown = _solutionButtonAnimation.value(
+		_solutionButtonVisible ? 1. : 0.);
+	if (!shown) {
+		return;
+	}
+	if (!_showSolutionLink) {
+		_showSolutionLink = std::make_shared<LambdaClickHandler>(
+			crl::guard(this, [=] { showSolution(); }));
+	}
+	const auto outbg = _parent->hasOutLayout();
+	const auto &icon = (selection == FullSelection)
+		? (outbg
+			? st::historyQuizExplainOutSelected
+			: st::historyQuizExplainInSelected)
+		: (outbg ? st::historyQuizExplainOut : st::historyQuizExplainIn);
+	const auto x = right - icon.width();
+	const auto y = top + (st::normalFont->height - icon.height()) / 2;
+	if (shown == 1.) {
+		icon.paint(p, x, y, width());
+	} else {
+		p.save();
+		p.translate(x + icon.width() / 2, y + icon.height() / 2);
+		p.scale(shown, shown);
+		p.setOpacity(shown);
+		icon.paint(p, -icon.width() / 2, -icon.height() / 2, width());
+		p.restore();
 	}
 }
 
@@ -590,6 +1060,8 @@ int Poll::paintAnswer(
 			p.setOpacity(sqrt(opacity));
 			paintFilling(
 				p,
+				animation->chosen,
+				animation->correct,
 				animation->filling.current(),
 				left,
 				top,
@@ -611,6 +1083,8 @@ int Poll::paintAnswer(
 			selection);
 		paintFilling(
 			p,
+			answer.chosen,
+			answer.correct,
 			answer.filling,
 			left,
 			top,
@@ -642,9 +1116,13 @@ void Poll::paintRadio(
 	const auto over = ClickHandler::showAsActive(answer.handler);
 	const auto &regular = selected ? (outbg ? st::msgOutDateFgSelected : st::msgInDateFgSelected) : (outbg ? st::msgOutDateFg : st::msgInDateFg);
 
-	p.setBrush(Qt::NoBrush);
+	const auto checkmark = answer.selectedAnimation.value(answer.selected ? 1. : 0.);
+
 	const auto o = p.opacity();
-	p.setOpacity(o * (over ? st::historyPollRadioOpacityOver : st::historyPollRadioOpacity));
+	if (checkmark < 1.) {
+		p.setBrush(Qt::NoBrush);
+		p.setOpacity(o * (over ? st::historyPollRadioOpacityOver : st::historyPollRadioOpacity));
+	}
 
 	const auto rect = QRectF(left, top, st.diameter, st.diameter).marginsRemoved(QMarginsF(st.thickness / 2., st.thickness / 2., st.thickness / 2., st.thickness / 2.));
 	if (_sendingAnimation && _sendingAnimation->option == answer.option) {
@@ -663,10 +1141,24 @@ void Poll::paintRadio(
 				state.arcLength);
 		}
 	} else {
-		auto pen = regular->p;
-		pen.setWidth(st.thickness);
-		p.setPen(pen);
-		p.drawEllipse(rect);
+		if (checkmark < 1.) {
+			auto pen = regular->p;
+			pen.setWidth(st.thickness);
+			p.setPen(pen);
+			p.drawEllipse(rect);
+		}
+		if (checkmark > 0.) {
+			const auto removeFull = (st.diameter / 2 - st.thickness);
+			const auto removeNow = removeFull * (1. - checkmark);
+			const auto color = outbg ? (selected ? st::msgFileThumbLinkOutFgSelected : st::msgFileThumbLinkOutFg) : (selected ? st::msgFileThumbLinkInFgSelected : st::msgFileThumbLinkInFg);
+			auto pen = color->p;
+			pen.setWidth(st.thickness);
+			p.setPen(pen);
+			p.setBrush(color);
+			p.drawEllipse(rect.marginsRemoved({ removeNow, removeNow, removeNow, removeNow }));
+			const auto &icon = outbg ? (selected ? st::historyPollOutChosenSelected : st::historyPollOutChosen) : (selected ? st::historyPollInChosenSelected : st::historyPollInChosen);
+			icon.paint(p, left + (st.diameter - icon.width()) / 2, top + (st.diameter - icon.height()) / 2, width());
+		}
 	}
 
 	p.setOpacity(o);
@@ -694,6 +1186,8 @@ void Poll::paintPercent(
 
 void Poll::paintFilling(
 		Painter &p,
+		bool chosen,
+		bool correct,
 		float64 filling,
 		int left,
 		int top,
@@ -710,15 +1204,38 @@ void Poll::paintFilling(
 
 	top += st::historyPollAnswerPadding.top();
 
-	const auto bar = outbg ? (selected ? st::msgWaveformOutActiveSelected : st::msgWaveformOutActive) : (selected ? st::msgWaveformInActiveSelected : st::msgWaveformInActive);
 	PainterHighQualityEnabler hq(p);
 	p.setPen(Qt::NoPen);
-	p.setBrush(bar);
+	const auto thickness = st::historyPollFillingHeight;
 	const auto max = awidth - st::historyPollFillingRight;
 	const auto size = anim::interpolate(st::historyPollFillingMin, max, filling);
 	const auto radius = st::historyPollFillingRadius;
-	const auto ftop = bottom - st::historyPollFillingBottom - st::historyPollFillingHeight;
-	p.drawRoundedRect(aleft, ftop, size, st::historyPollFillingHeight, radius, radius);
+	const auto ftop = bottom - st::historyPollFillingBottom - thickness;
+
+	if (chosen && !correct) {
+		p.setBrush(st::boxTextFgError);
+	} else if (chosen && correct && _poll->quiz() && !outbg) {
+		p.setBrush(st::boxTextFgGood);
+	} else {
+		const auto bar = outbg ? (selected ? st::msgWaveformOutActiveSelected : st::msgWaveformOutActive) : (selected ? st::msgWaveformInActiveSelected : st::msgWaveformInActive);
+		p.setBrush(bar);
+	}
+	auto barleft = aleft;
+	auto barwidth = size;
+	if (chosen || correct) {
+		const auto &icon = (chosen && !correct)
+			? st::historyPollChoiceWrong
+			: st::historyPollChoiceRight;
+		const auto cleft = aleft - st::historyPollPercentSkip - icon.width();
+		const auto ctop = ftop - (icon.height() - thickness) / 2;
+		p.drawEllipse(cleft, ctop, icon.width(), icon.height());
+		icon.paint(p, cleft, ctop, width);
+		//barleft += icon.width() - radius;
+		//barwidth -= icon.width() - radius;
+	}
+	if (barwidth > 0) {
+		p.drawRoundedRect(barleft, ftop, barwidth, thickness, radius, radius);
+	}
 }
 
 bool Poll::answerVotesChanged() const {
@@ -746,6 +1263,8 @@ void Poll::saveStateInAnimation() const {
 		result.percent = show ? float64(answer.votesPercent) : 0.;
 		result.filling = show ? answer.filling : 0.;
 		result.opacity = show ? 1. : 0.;
+		result.chosen = answer.chosen;
+		result.correct = answer.correct;
 		return result;
 	};
 	ranges::transform(
@@ -759,7 +1278,7 @@ bool Poll::checkAnimationStart() const {
 		// Skip initial changes.
 		return false;
 	}
-	const auto result = (showVotes() != (_poll->voted() || _poll->closed))
+	const auto result = (showVotes() != (_poll->voted() || _poll->closed()))
 		|| answerVotesChanged();
 	if (result) {
 		saveStateInAnimation();
@@ -778,6 +1297,8 @@ void Poll::startAnswersAnimation() const {
 		data.percent.start(show ? float64(answer.votesPercent) : 0.);
 		data.filling.start(show ? answer.filling : 0.);
 		data.opacity.start(show ? 1. : 0.);
+		data.chosen = data.chosen || answer.chosen;
+		data.correct = data.correct || answer.correct;
 	}
 	_answersAnimation->progress.start(
 		[=] { history()->owner().requestViewRepaint(_parent); },
@@ -788,7 +1309,7 @@ void Poll::startAnswersAnimation() const {
 
 TextState Poll::textState(QPoint point, StateRequest request) const {
 	auto result = TextState(_parent);
-	if (!_poll->sendingVote.isEmpty()) {
+	if (!_poll->sendingVotes.empty()) {
 		return result;
 	}
 
@@ -803,6 +1324,10 @@ TextState Poll::textState(QPoint point, StateRequest request) const {
 	paintw -= padding.left() + padding.right();
 
 	tshift += _question.countHeight(paintw) + st::historyPollSubtitleSkip;
+	if (inShowSolution(point, padding.left() + paintw, tshift)) {
+		result.link = _showSolutionLink;
+		return result;
+	}
 	tshift += st::msgDateFont->height + st::historyPollAnswersSkip;
 	const auto awidth = paintw
 		- st::historyPollAnswerPadding.left()
@@ -817,16 +1342,83 @@ TextState Poll::textState(QPoint point, StateRequest request) const {
 				result.customTooltip = true;
 				using Flag = Ui::Text::StateRequest::Flag;
 				if (request.flags & Flag::LookupCustomTooltip) {
+					const auto quiz = _poll->quiz();
 					result.customTooltipText = answer.votes
-						? tr::lng_polls_votes_count(tr::now, lt_count_decimal, answer.votes)
-						: tr::lng_polls_votes_none(tr::now);
+						? (quiz
+							? tr::lng_polls_answers_count
+							: tr::lng_polls_votes_count)(
+								tr::now,
+								lt_count_decimal,
+								answer.votes)
+						: (quiz
+							? tr::lng_polls_answers_none
+							: tr::lng_polls_votes_none)(tr::now);
 				}
 			}
 			return result;
 		}
 		tshift += height;
 	}
+	if (!showVotersCount()) {
+		const auto link = showVotes()
+			? _showResultsLink
+			: canSendVotes()
+			? _sendVotesLink
+			: nullptr;
+		if (link) {
+			const auto linkHeight = bottomButtonHeight();
+			const auto linkTop = height() - linkHeight;
+			if (QRect(0, linkTop, width(), linkHeight).contains(point)) {
+				_lastLinkPoint = point;
+				result.link = link;
+				return result;
+			}
+		}
+	}
 	return result;
+}
+
+auto Poll::bubbleRoll() const -> BubbleRoll {
+	const auto value = _wrongAnswerAnimation.value(1.);
+	_wrongAnswerAnimated = (value < 1.);
+	if (!_wrongAnswerAnimated) {
+		return BubbleRoll();
+	}
+	const auto rotateFull = value * kRotateSegments;
+	const auto progress = [](float64 full) {
+		const auto lower = std::floor(full);
+		const auto shift = (full - lower);
+		switch (int(lower) % 4) {
+		case 0: return -shift;
+		case 1: return (shift - 1.);
+		case 2: return shift;
+		case 3: return (1. - shift);
+		}
+		Unexpected("Value in Poll::getBubbleRollDegrees.");
+	};
+	return {
+		.rotate = progress(value * kRotateSegments) * kRotateAmplitude,
+		.scale = 1. + progress(value * kScaleSegments) * kScaleAmplitude
+	};
+}
+
+QMargins Poll::bubbleRollRepaintMargins() const {
+	if (!_wrongAnswerAnimated) {
+		return QMargins();
+	}
+	static const auto kAdd = int(std::ceil(
+		st::msgMaxWidth * std::sin(kRotateAmplitude * M_PI / 180.)));
+	return QMargins(kAdd, kAdd, kAdd, kAdd);
+}
+
+void Poll::paintBubbleFireworks(
+		Painter &p,
+		const QRect &bubble,
+		crl::time ms) const {
+	if (!_fireworksAnimation || _fireworksAnimation->paint(p, bubble)) {
+		return;
+	}
+	_fireworksAnimation = nullptr;
 }
 
 void Poll::clickHandlerPressedChanged(
@@ -840,7 +1432,24 @@ void Poll::clickHandlerPressedChanged(
 		&Answer::handler);
 	if (i != end(_answers)) {
 		toggleRipple(*i, pressed);
+	} else if (handler == _sendVotesLink || handler == _showResultsLink) {
+		toggleLinkRipple(pressed);
 	}
+}
+
+void Poll::unloadHeavyPart() {
+	for (auto &recent : _recentVoters) {
+		recent.userpic = nullptr;
+	}
+}
+
+bool Poll::hasHeavyPart() const {
+	for (auto &recent : _recentVoters) {
+		if (recent.userpic) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void Poll::toggleRipple(Answer &answer, bool pressed) {
@@ -862,15 +1471,81 @@ void Poll::toggleRipple(Answer &answer, bool pressed) {
 		}
 		const auto top = countAnswerTop(answer, innerWidth);
 		answer.ripple->add(_lastLinkPoint - QPoint(0, top));
-	} else {
-		if (answer.ripple) {
-			answer.ripple->lastStop();
+	} else if (answer.ripple) {
+		answer.ripple->lastStop();
+	}
+}
+
+bool Poll::canShowSolution() const {
+	return showVotes() && !_poll->solution.text.isEmpty();
+}
+
+bool Poll::inShowSolution(
+		QPoint point,
+		int right,
+		int top) const {
+	if (!canShowSolution() || !_solutionButtonVisible) {
+		return false;
+	}
+	const auto &icon = st::historyQuizExplainIn;
+	const auto x = right - icon.width();
+	const auto y = top + (st::normalFont->height - icon.height()) / 2;
+	return QRect(x, y, icon.width(), icon.height()).contains(point);
+}
+
+int Poll::bottomButtonHeight() const {
+	const auto skip = st::historyPollChoiceRight.height()
+		- st::historyPollFillingBottom
+		- st::historyPollFillingHeight
+		- (st::historyPollChoiceRight.height() - st::historyPollFillingHeight) / 2;
+	return st::historyPollTotalVotesSkip
+		- skip
+		+ st::historyPollBottomButtonSkip
+		+ st::msgDateFont->height
+		+ st::msgPadding.bottom();
+}
+
+void Poll::toggleLinkRipple(bool pressed) {
+	if (pressed) {
+		const auto linkWidth = width();
+		const auto linkHeight = bottomButtonHeight();
+		if (!_linkRipple) {
+			const auto drawMask = [&](QPainter &p) {
+				const auto radius = st::historyMessageRadius;
+				p.drawRoundedRect(
+					0,
+					0,
+					linkWidth,
+					linkHeight,
+					radius,
+					radius);
+				p.fillRect(0, 0, linkWidth, radius * 2, Qt::white);
+			};
+			auto mask = isRoundedInBubbleBottom()
+				? Ui::RippleAnimation::maskByDrawer(
+					QSize(linkWidth, linkHeight),
+					false,
+					drawMask)
+				: Ui::RippleAnimation::rectMask({ linkWidth, linkHeight });
+			_linkRipple = std::make_unique<Ui::RippleAnimation>(
+				(_parent->hasOutLayout()
+					? st::historyPollRippleOut
+					: st::historyPollRippleIn),
+				std::move(mask),
+				[=] { history()->owner().requestViewRepaint(_parent); });
 		}
+		_linkRipple->add(_lastLinkPoint - QPoint(0, height() - linkHeight));
+	} else if (_linkRipple) {
+		_linkRipple->lastStop();
 	}
 }
 
 Poll::~Poll() {
 	history()->owner().unregisterPollView(_poll, _parent);
+	if (hasHeavyPart()) {
+		unloadHeavyPart();
+		_parent->checkHeavyPart();
+	}
 }
 
 } // namespace HistoryView

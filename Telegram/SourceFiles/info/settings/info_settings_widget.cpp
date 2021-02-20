@@ -32,7 +32,7 @@ object_ptr<ContentWidget> Memento::createWidget(
 		parent,
 		controller);
 	result->setInternalState(geometry, this);
-	return std::move(result);
+	return result;
 }
 
 Memento::~Memento() = default;
@@ -43,7 +43,8 @@ Widget::Widget(
 : ContentWidget(parent, controller)
 , _self(controller->key().settingsSelf())
 , _type(controller->section().settingsType())
-, _inner(setInnerWidget(::Settings::CreateSection(
+, _inner(setInnerWidget(
+	::Settings::CreateSection(
 		_type,
 		this,
 		controller->parentController()))) {
@@ -54,6 +55,8 @@ Widget::Widget(
 
 	controller->setCanSaveChanges(_inner->sectionCanSaveChanges());
 }
+
+Widget::~Widget() = default;
 
 not_null<UserData*> Widget::self() const {
 	return _self;
@@ -92,10 +95,10 @@ rpl::producer<bool> Widget::desiredShadowVisibility() const {
 		: rpl::single(true);
 }
 
-std::unique_ptr<ContentMemento> Widget::doCreateMemento() {
-	auto result = std::make_unique<Memento>(self(), _type);
+std::shared_ptr<ContentMemento> Widget::doCreateMemento() {
+	auto result = std::make_shared<Memento>(self(), _type);
 	saveState(result.get());
-	return std::move(result);
+	return result;
 }
 
 void Widget::saveState(not_null<Memento*> memento) {

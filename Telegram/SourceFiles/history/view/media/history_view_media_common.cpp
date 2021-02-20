@@ -7,7 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/media/history_view_media_common.h"
 
-#include "layout.h"
+#include "ui/text/format_values.h"
 #include "data/data_document.h"
 #include "history/view/history_view_element.h"
 #include "history/view/media/history_view_media_grouped.h"
@@ -15,25 +15,24 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/view/media/history_view_gif.h"
 #include "history/view/media/history_view_document.h"
 #include "history/view/media/history_view_sticker.h"
-#include "history/view/media/history_view_video.h"
 #include "history/view/media/history_view_theme_document.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 namespace HistoryView {
 
 int documentMaxStatusWidth(DocumentData *document) {
-	auto result = st::normalFont->width(formatDownloadText(document->size, document->size));
+	auto result = st::normalFont->width(Ui::FormatDownloadText(document->size, document->size));
 	const auto duration = document->getDuration();
 	if (const auto song = document->song()) {
-		accumulate_max(result, st::normalFont->width(formatPlayedText(duration, duration)));
-		accumulate_max(result, st::normalFont->width(formatDurationAndSizeText(duration, document->size)));
+		accumulate_max(result, st::normalFont->width(Ui::FormatPlayedText(duration, duration)));
+		accumulate_max(result, st::normalFont->width(Ui::FormatDurationAndSizeText(duration, document->size)));
 	} else if (const auto voice = document->voice()) {
-		accumulate_max(result, st::normalFont->width(formatPlayedText(duration, duration)));
-		accumulate_max(result, st::normalFont->width(formatDurationAndSizeText(duration, document->size)));
+		accumulate_max(result, st::normalFont->width(Ui::FormatPlayedText(duration, duration)));
+		accumulate_max(result, st::normalFont->width(Ui::FormatDurationAndSizeText(duration, document->size)));
 	} else if (document->isVideoFile()) {
-		accumulate_max(result, st::normalFont->width(formatDurationAndSizeText(duration, document->size)));
+		accumulate_max(result, st::normalFont->width(Ui::FormatDurationAndSizeText(duration, document->size)));
 	} else {
-		accumulate_max(result, st::normalFont->width(formatSizeText(document->size)));
+		accumulate_max(result, st::normalFont->width(Ui::FormatSizeText(document->size)));
 	}
 	return result;
 }
@@ -73,20 +72,15 @@ std::unique_ptr<Media> CreateAttach(
 			return std::make_unique<UnwrappedMedia>(
 				parent,
 				std::make_unique<Sticker>(parent, document));
-		} else if (document->isAnimation()) {
-			return std::make_unique<Gif>(parent, document);
-		} else if (document->isVideoFile()) {
-			return std::make_unique<Video>(
-				parent,
-				parent->data(),
-				document);
+		} else if (document->isAnimation() || document->isVideoFile()) {
+			return std::make_unique<Gif>(parent, parent->data(), document);
 		} else if (document->isWallPaper() || document->isTheme()) {
 			return std::make_unique<ThemeDocument>(
 				parent,
 				document,
 				webpageUrl);
 		}
-		return std::make_unique<Document>(parent, document);
+		return std::make_unique<Document>(parent, parent->data(), document);
 	} else if (photo) {
 		return std::make_unique<Photo>(
 			parent,

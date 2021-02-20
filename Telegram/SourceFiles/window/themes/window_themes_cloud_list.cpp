@@ -15,6 +15,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_cloud_themes.h"
 #include "data/data_file_origin.h"
 #include "data/data_document.h"
+#include "data/data_document_media.h"
 #include "data/data_session.h"
 #include "ui/image/image_prepare.h"
 #include "ui/widgets/popup_menu.h"
@@ -25,7 +26,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/application.h"
 #include "styles/style_settings.h"
 #include "styles/style_boxes.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 #include <QtGui/QGuiApplication>
 #include <QtGui/QClipboard>
@@ -211,6 +212,7 @@ void CloudListCheck::validateBackgroundCache(int width) {
 			imageWidth,
 			_backgroundFull.height());
 	Images::prepareRound(_backgroundCache, ImageRoundRadius::Large);
+	_backgroundCache.setDevicePixelRatio(cRetinaFactor());
 }
 
 void CloudListCheck::paint(Painter &p, int left, int top, int outerWidth) {
@@ -311,6 +313,7 @@ object_ptr<Ui::RpWidget> CloudList::takeWidget() {
 
 rpl::producer<bool> CloudList::empty() const {
 	using namespace rpl::mappers;
+
 	return _count.value() | rpl::map(_1 == 0);
 }
 
@@ -558,11 +561,12 @@ void CloudList::refreshColors(Element &element) {
 			&& (!document || !document->isTheme()))) {
 		element.check->setColors(ColorsFromCurrentTheme());
 	} else if (document) {
+		element.media = document ? document->createMediaView() : nullptr;
 		document->save(
 			Data::FileOriginTheme(theme.id, theme.accessHash),
 			QString());
-		if (document->loaded()) {
-			refreshColorsFromDocument(element, document);
+		if (element.media->loaded()) {
+			refreshColorsFromDocument(element);
 		} else {
 			setWaiting(element, true);
 			subscribeToDownloadFinished();
@@ -582,7 +586,7 @@ void CloudList::showMenu(Element &element) {
 	if (const auto slug = element.theme.slug; !slug.isEmpty()) {
 		_contextMenu->addAction(tr::lng_theme_share(tr::now), [=] {
 			QGuiApplication::clipboard()->setText(
-				Core::App().createInternalLinkFull("addtheme/" + slug));
+				_window->session().createInternalLinkFull("addtheme/" + slug));
 			Ui::Toast::Show(tr::lng_background_link_copied(tr::now));
 		});
 	}
@@ -595,11 +599,8 @@ void CloudList::showMenu(Element &element) {
 	}
 	const auto id = cloud.id;
 	_contextMenu->addAction(tr::lng_theme_delete(tr::now), [=] {
-		const auto box = std::make_shared<QPointer<BoxContent>>();
-		const auto remove = [=] {
-			if (*box) {
-				(*box)->closeBox();
-			}
+		const auto remove = [=](Fn<void()> &&close) {
+			close();
 			if (Background()->themeObject().cloud.id == id
 				|| id == kFakeCloudThemeId) {
 				if (Background()->editingTheme().has_value()) {
@@ -614,7 +615,7 @@ void CloudList::showMenu(Element &element) {
 				_window->session().data().cloudThemes().remove(id);
 			}
 		};
-		*box = _window->window().show(Box<ConfirmBox>(
+		_window->window().show(Box<ConfirmBox>(
 			tr::lng_theme_delete_sure(tr::now),
 			tr::lng_theme_delete(tr::now),
 			remove));
@@ -632,12 +633,13 @@ bool CloudList::amCreator(const Data::CloudTheme &theme) const {
 	return (_window->session().userId() == theme.createdBy);
 }
 
-void CloudList::refreshColorsFromDocument(
-		Element &element,
-		not_null<DocumentData*> document) {
+void CloudList::refreshColorsFromDocument(Element &element) {
+	Expects(element.media != nullptr);
+	Expects(element.media->loaded());
+
 	const auto id = element.id();
-	const auto path = document->filepath();
-	const auto data = document->data();
+	const auto path = element.media->owner()->filepath();
+	const auto data = base::take(element.media)->bytes();
 	crl::async([=, guard = element.generating.make_guard()]() mutable {
 		crl::on_main(std::move(guard), [
 			=,
@@ -661,17 +663,17 @@ void CloudList::subscribeToDownloadFinished() {
 	if (_downloadFinishedLifetime) {
 		return;
 	}
-	base::ObservableViewer(
-		_window->session().downloaderTaskFinished()
+	_window->session().downloaderTaskFinished(
 	) | rpl::start_with_next([=] {
 		auto &&waiting = _elements | ranges::view::filter(&Element::waiting);
 		const auto still = ranges::count_if(waiting, [&](Element &element) {
-			const auto id = element.theme.documentId;
-			const auto document = _window->session().data().document(id);
-			if (!document->loaded()) {
+			if (!element.media) {
+				element.waiting = false;
+				return false;
+			} else if (!element.media->loaded()) {
 				return true;
 			}
-			refreshColorsFromDocument(element, document);
+			refreshColorsFromDocument(element);
 			element.waiting = false;
 			return false;
 		});
@@ -719,6 +721,7 @@ int CloudList::resizeGetHeight(int newWidth) {
 	auto rowHeight = 0;
 	for (const auto &element : _elements) {
 		const auto button = element.button.get();
+		button->resizeToWidth(single);
 		button->moveToLeft(int(std::round(x)), y);
 		accumulate_max(rowHeight, button->height());
 		x += single + skip;

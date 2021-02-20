@@ -56,6 +56,9 @@ public:
 	void stopAnimation() override {
 		if (_attach) _attach->stopAnimation();
 	}
+	void checkAnimation() override {
+		if (_attach) _attach->checkAnimation();
+	}
 
 	not_null<GameData*> game() {
 		return _data;
@@ -76,6 +79,15 @@ public:
 	}
 
 	void parentTextUpdated() override;
+
+	bool hasHeavyPart() const override {
+		return _attach ? _attach->hasHeavyPart() : false;
+	}
+	void unloadHeavyPart() override {
+		if (_attach) {
+			_attach->unloadHeavyPart();
+		}
+	}
 
 	~Game();
 

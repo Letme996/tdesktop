@@ -15,13 +15,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/effects/animations.h"
 #include "ui/effects/radial_animation.h"
 #include "ui/emoji_config.h"
-#include "lang/lang_keys.h"
-#include "base/zlib_help.h"
-#include "layout.h"
 #include "core/application.h"
 #include "main/main_account.h"
 #include "mainwidget.h"
 #include "app.h"
+#include "storage/storage_cloud_blob.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 #include "styles/style_chat_helpers.h"
 
@@ -29,84 +28,57 @@ namespace Ui {
 namespace Emoji {
 namespace {
 
-struct Available {
-	int size = 0;
+using namespace Storage::CloudBlob;
 
-	inline bool operator<(const Available &other) const {
-		return size < other.size;
-	}
-	inline bool operator==(const Available &other) const {
-		return size == other.size;
-	}
+struct Set : public Blob {
+	QString previewPath;
 };
-struct Ready {
-	inline bool operator<(const Ready &other) const {
-		return false;
-	}
-	inline bool operator==(const Ready &other) const {
-		return true;
-	}
+
+inline auto PreviewPath(int i) {
+	return qsl(":/gui/emoji/set%1_preview.webp").arg(i);
+}
+
+const auto kSets = {
+	Set{ {0,   0,         0, "Mac"},       PreviewPath(0) },
+	Set{ {1, 713, 7'313'166, "Android"},   PreviewPath(1) },
+	Set{ {2, 714, 4'690'333, "Twemoji"},   PreviewPath(2) },
+	Set{ {3, 716, 5'968'021, "JoyPixels"}, PreviewPath(3) },
 };
-struct Active {
-	inline bool operator<(const Active &other) const {
-		return false;
-	}
-	inline bool operator==(const Active &other) const {
-		return true;
-	}
-};
+
 using Loading = MTP::DedicatedLoader::Progress;
-struct Failed {
-	inline bool operator<(const Failed &other) const {
-		return false;
-	}
-	inline bool operator==(const Failed &other) const {
-		return true;
-	}
-};
-using SetState = base::variant<
-	Available,
-	Ready,
-	Active,
-	Loading,
-	Failed>;
+using SetState = BlobState;
 
-class Loader : public QObject {
+class Loader final : public BlobLoader {
 public:
-	Loader(QObject *parent, int id);
+	Loader(
+		not_null<Main::Session*> session,
+		int id,
+		MTP::DedicatedLoader::Location location,
+		const QString &folder,
+		int size);
 
-	int id() const;
-
-	rpl::producer<SetState> state() const;
-	void destroy();
+	void destroy() override;
+	void unpack(const QString &path) override;
 
 private:
-	void setImplementation(std::unique_ptr<MTP::DedicatedLoader> loader);
-	void unpack(const QString &path);
-	void finalize(const QString &path);
-	void fail();
-
-	int _id = 0;
-	int _size = 0;
-	rpl::variable<SetState> _state;
-
-	MTP::WeakInstance _mtproto;
-	std::unique_ptr<MTP::DedicatedLoader> _implementation;
+	void fail() override;
 
 };
 
 class Inner : public Ui::RpWidget {
 public:
-	Inner(QWidget *parent);
+	Inner(QWidget *parent, not_null<Main::Session*> session);
 
 private:
 	void setupContent();
+
+	const not_null<Main::Session*> _session;
 
 };
 
 class Row : public Ui::RippleButton {
 public:
-	Row(QWidget *widget, const Set &set);
+	Row(QWidget *widget, not_null<Main::Session*> session, const Set &set);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -126,7 +98,9 @@ private:
 	void setupHandler();
 	void load();
 	void radialAnimationCallback(crl::time now);
+	void updateLoadingToFinished();
 
+	const not_null<Main::Session*> _session;
 	int _id = 0;
 	bool _switching = false;
 	rpl::variable<SetState> _state;
@@ -147,15 +121,19 @@ void SetGlobalLoader(base::unique_qptr<Loader> loader) {
 }
 
 int GetDownloadSize(int id) {
-	const auto sets = Sets();
-	return ranges::find(sets, id, &Set::id)->size;
+	return ranges::find(kSets, id, &Set::id)->size;
+}
+
+[[nodiscard]] float64 CountProgress(not_null<const Loading*> loading) {
+	return (loading->size > 0)
+		? (loading->already / float64(loading->size))
+		: 0.;
 }
 
 MTP::DedicatedLoader::Location GetDownloadLocation(int id) {
-	constexpr auto kUsername = "tdhbcfiles";
-	const auto sets = Sets();
-	const auto i = ranges::find(sets, id, &Set::id);
-	return MTP::DedicatedLoader::Location{ kUsername, i->postId };
+	const auto username = kCloudLocationUsername.utf16();
+	const auto i = ranges::find(kSets, id, &Set::id);
+	return MTP::DedicatedLoader::Location{ username, i->postId };
 }
 
 SetState ComputeState(int id) {
@@ -168,45 +146,9 @@ SetState ComputeState(int id) {
 }
 
 QString StateDescription(const SetState &state) {
-	return state.match([](const Available &data) {
-		return tr::lng_emoji_set_download(tr::now, lt_size, formatSizeText(data.size));
-	}, [](const Ready &data) -> QString {
-		return tr::lng_emoji_set_ready(tr::now);
-	}, [](const Active &data) -> QString {
-		return tr::lng_emoji_set_active(tr::now);
-	}, [](const Loading &data) {
-		const auto percent = (data.size > 0)
-			? snap((data.already * 100) / float64(data.size), 0., 100.)
-			: 0.;
-		return tr::lng_emoji_set_loading(
-			tr::now,
-			lt_percent,
-			QString::number(int(std::round(percent))) + '%',
-			lt_progress,
-			formatDownloadText(data.already, data.size));
-	}, [](const Failed &data) {
-		return tr::lng_attach_failed(tr::now);
-	});
-}
-
-QByteArray ReadFinalFile(const QString &path) {
-	constexpr auto kMaxZipSize = 10 * 1024 * 1024;
-	auto file = QFile(path);
-	if (file.size() > kMaxZipSize || !file.open(QIODevice::ReadOnly)) {
-		return QByteArray();
-	}
-	return file.readAll();
-}
-
-bool ExtractZipFile(zlib::FileToRead &zip, const QString path) {
-	constexpr auto kMaxSize = 10 * 1024 * 1024;
-	const auto content = zip.readCurrentFileContent(kMaxSize);
-	if (content.isEmpty() || zip.error() != UNZ_OK) {
-		return false;
-	}
-	auto file = QFile(path);
-	return file.open(QIODevice::WriteOnly)
-		&& (file.write(content) == content.size());
+	return StateDescription(
+		state,
+		tr::lng_emoji_set_active);
 }
 
 bool GoodSetPartName(const QString &name) {
@@ -216,89 +158,26 @@ bool GoodSetPartName(const QString &name) {
 }
 
 bool UnpackSet(const QString &path, const QString &folder) {
-	const auto bytes = ReadFinalFile(path);
-	if (bytes.isEmpty()) {
-		return false;
-	}
-
-	auto zip = zlib::FileToRead(bytes);
-	if (zip.goToFirstFile() != UNZ_OK) {
-		return false;
-	}
-	do {
-		const auto name = zip.getCurrentFileName();
-		const auto path = folder + '/' + name;
-		if (GoodSetPartName(name) && !ExtractZipFile(zip, path)) {
-			return false;
-		}
-
-		const auto jump = zip.goToNextFile();
-		if (jump == UNZ_END_OF_LIST_OF_FILE) {
-			break;
-		} else if (jump != UNZ_OK) {
-			return false;
-		}
-	} while (true);
-	return true;
+	return UnpackBlob(path, folder, GoodSetPartName);
 }
 
-Loader::Loader(QObject *parent, int id)
-: QObject(parent)
-, _id(id)
-, _size(GetDownloadSize(_id))
-, _state(Loading{ 0, _size })
-, _mtproto(Core::App().activeAccount().mtp()) {
-	const auto ready = [=](std::unique_ptr<MTP::DedicatedLoader> loader) {
-		if (loader) {
-			setImplementation(std::move(loader));
-		} else {
-			fail();
-		}
-	};
-	const auto location = GetDownloadLocation(id);
-	const auto folder = internal::SetDataPath(id);
-	MTP::StartDedicatedLoader(&_mtproto, location, folder, ready);
-}
 
-int Loader::id() const {
-	return _id;
-}
-
-rpl::producer<SetState> Loader::state() const {
-	return _state.value();
-}
-
-void Loader::setImplementation(
-		std::unique_ptr<MTP::DedicatedLoader> loader) {
-	_implementation = std::move(loader);
-	auto convert = [](auto value) {
-		return SetState(value);
-	};
-	_state = _implementation->progress(
-	) | rpl::map([](const Loading &state) {
-		return SetState(state);
-	});
-	_implementation->failed(
-	) | rpl::start_with_next([=] {
-		fail();
-	}, _implementation->lifetime());
-
-	_implementation->ready(
-	) | rpl::start_with_next([=](const QString &filepath) {
-		unpack(filepath);
-	}, _implementation->lifetime());
-
-	QDir(internal::SetDataPath(_id)).removeRecursively();
-	_implementation->start();
+Loader::Loader(
+	not_null<Main::Session*> session,
+	int id,
+	MTP::DedicatedLoader::Location location,
+	const QString &folder,
+	int size)
+: BlobLoader(nullptr, session, id, location, folder, size) {
 }
 
 void Loader::unpack(const QString &path) {
-	const auto folder = internal::SetDataPath(_id);
+	const auto folder = internal::SetDataPath(id());
 	const auto weak = Ui::MakeWeak(this);
 	crl::async([=] {
 		if (UnpackSet(path, folder)) {
 			QFile(path).remove();
-			SwitchToSet(_id, crl::guard(weak, [=](bool success) {
+			SwitchToSet(id(), crl::guard(weak, [=](bool success) {
 				if (success) {
 					destroy();
 				} else {
@@ -313,37 +192,37 @@ void Loader::unpack(const QString &path) {
 	});
 }
 
-void Loader::finalize(const QString &path) {
-}
-
-void Loader::fail() {
-	_state = Failed();
-}
-
 void Loader::destroy() {
 	Expects(GlobalLoader == this);
 
 	SetGlobalLoader(nullptr);
 }
 
-Inner::Inner(QWidget *parent) : RpWidget(parent) {
+void Loader::fail() {
+	ClearNeedSwitchToId();
+	BlobLoader::fail();
+}
+
+Inner::Inner(QWidget *parent, not_null<Main::Session*> session)
+: RpWidget(parent)
+, _session(session) {
 	setupContent();
 }
 
 void Inner::setupContent() {
 	const auto content = Ui::CreateChild<Ui::VerticalLayout>(this);
 
-	const auto sets = Sets();
-	for (const auto &set : sets) {
-		content->add(object_ptr<Row>(content, set));
+	for (const auto &set : kSets) {
+		content->add(object_ptr<Row>(content, _session, set));
 	}
 
 	content->resizeToWidth(st::boxWidth);
 	Ui::ResizeFitChild(this, content);
 }
 
-Row::Row(QWidget *widget, const Set &set)
-: RippleButton(widget, st::contactsRipple)
+Row::Row(QWidget *widget, not_null<Main::Session*> session, const Set &set)
+: RippleButton(widget, st::defaultRippleAnimation)
+, _session(session)
 , _id(set.id)
 , _state(Available{ set.size }) {
 	setupContent(set);
@@ -378,11 +257,14 @@ void Row::paintPreview(Painter &p) const {
 }
 
 void Row::paintRadio(Painter &p) {
+	if (_loading && !_loading->animating()) {
+		_loading = nullptr;
+	}
 	const auto loading = _loading
 		? _loading->computeState()
 		: Ui::RadialState{ 0., 0, FullArcLength };
-	const auto isToggledSet = _state.current().is<Active>();
-	const auto isActiveSet = isToggledSet || _state.current().is<Loading>();
+	const auto isToggledSet = v::is<Active>(_state.current());
+	const auto isActiveSet = isToggledSet || v::is<Loading>(_state.current());
 	const auto toggled = _toggled.value(isToggledSet ? 1. : 0.);
 	const auto active = _active.value(isActiveSet ? 1. : 0.);
 	const auto _st = &st::defaultRadio;
@@ -463,7 +345,7 @@ void Row::onStateChanged(State was, StateChangeSource source) {
 }
 
 void Row::updateStatusColorOverride() {
-	const auto isToggledSet = _state.current().is<Active>();
+	const auto isToggledSet = v::is<Active>(_state.current());
 	const auto toggled = _toggled.value(isToggledSet ? 1. : 0.);
 	const auto over = showOver();
 	if (toggled == 0. && !over) {
@@ -491,7 +373,8 @@ void Row::setupContent(const Set &set) {
 			});
 	}) | rpl::flatten_latest(
 	) | rpl::filter([=](const SetState &state) {
-		return !_state.current().is<Failed>() || !state.is<Available>();
+		return !v::is<Failed>(_state.current())
+			|| !v::is<Available>(state);
 	});
 
 	setupLabels(set);
@@ -508,9 +391,10 @@ void Row::setupHandler() {
 	clicks(
 	) | rpl::filter([=] {
 		const auto &state = _state.current();
-		return !_switching && (state.is<Ready>() || state.is<Available>());
+		return !_switching && (v::is<Ready>(state)
+			|| v::is<Available>(state));
 	}) | rpl::start_with_next([=] {
-		if (_state.current().is<Available>()) {
+		if (v::is<Available>(_state.current())) {
 			load();
 			return;
 		}
@@ -527,7 +411,7 @@ void Row::setupHandler() {
 
 	_state.value(
 	) | rpl::map([=](const SetState &state) {
-		return state.is<Ready>() || state.is<Available>();
+		return v::is<Ready>(state) || v::is<Available>(state);
 	}) | rpl::start_with_next([=](bool active) {
 		setDisabled(!active);
 		setPointerCursor(active);
@@ -535,7 +419,7 @@ void Row::setupHandler() {
 }
 
 void Row::load() {
-	SetGlobalLoader(base::make_unique_q<Loader>(App::main(), _id));
+	LoadAndSwitchTo(_session, _id);
 }
 
 void Row::setupLabels(const Set &set) {
@@ -579,14 +463,20 @@ void Row::setupPreview(const Set &set) {
 	}
 }
 
+void Row::updateLoadingToFinished() {
+	_loading->update(
+		v::is<Failed>(_state.current()) ? 0. : 1.,
+		true,
+		crl::now());
+}
+
 void Row::radialAnimationCallback(crl::time now) {
 	const auto updated = [&] {
 		const auto state = _state.current();
-		if (const auto loading = base::get_if<Loading>(&state)) {
-			const auto progress = (loading->size > 0)
-				? (loading->already / float64(loading->size))
-				: 0.;
-			return _loading->update(progress, false, now);
+		if (const auto loading = std::get_if<Loading>(&state)) {
+			return _loading->update(CountProgress(loading), false, now);
+		} else {
+			updateLoadingToFinished();
 		}
 		return false;
 	}();
@@ -605,7 +495,7 @@ void Row::setupAnimation() {
 
 	_state.value(
 	) | rpl::map(
-		_1 == Active()
+		_1 == SetState{ Active() }
 	) | rpl::distinct_until_changed(
 	) | rpl::start_with_next([=](bool toggled) {
 		_toggled.start(
@@ -617,7 +507,7 @@ void Row::setupAnimation() {
 
 	_state.value(
 	) | rpl::map([](const SetState &state) {
-		return state.is<Loading>() || state.is<Active>();
+		return v::is<Loading>(state) || v::is<Active>(state);
 	}) | rpl::distinct_until_changed(
 	) | rpl::start_with_next([=](bool active) {
 		_active.start(
@@ -629,21 +519,15 @@ void Row::setupAnimation() {
 
 	_state.value(
 	) | rpl::map([](const SetState &state) {
-		return base::get_if<Loading>(&state);
+		return std::get_if<Loading>(&state);
 	}) | rpl::distinct_until_changed(
 	) | rpl::start_with_next([=](const Loading *loading) {
 		if (loading && !_loading) {
 			_loading = std::make_unique<Ui::RadialAnimation>(
 				[=](crl::time now) { radialAnimationCallback(now); });
-			const auto progress = (loading->size > 0)
-				? (loading->already / float64(loading->size))
-				: 0.;
-			_loading->start(progress);
+			_loading->start(CountProgress(loading));
 		} else if (!loading && _loading) {
-			_loading->update(
-				_state.current().is<Failed>() ? 0. : 1.,
-				true,
-				crl::now());
+			updateLoadingToFinished();
 		}
 	}, lifetime());
 
@@ -654,17 +538,31 @@ void Row::setupAnimation() {
 
 } // namespace
 
-ManageSetsBox::ManageSetsBox(QWidget*) {
+ManageSetsBox::ManageSetsBox(QWidget*, not_null<Main::Session*> session)
+: _session(session) {
 }
 
 void ManageSetsBox::prepare() {
-	const auto inner = setInnerWidget(object_ptr<Inner>(this));
+	const auto inner = setInnerWidget(object_ptr<Inner>(this, _session));
 
 	setTitle(tr::lng_emoji_manage_sets());
 
 	addButton(tr::lng_close(), [=] { closeBox(); });
 
 	setDimensionsToContent(st::boxWidth, inner);
+}
+
+void LoadAndSwitchTo(not_null<Main::Session*> session, int id) {
+	if (!ranges::contains(kSets, id, &Set::id)) {
+		ClearNeedSwitchToId();
+		return;
+	}
+	SetGlobalLoader(base::make_unique_q<Loader>(
+		session,
+		id,
+		GetDownloadLocation(id),
+		internal::SetDataPath(id),
+		GetDownloadSize(id)));
 }
 
 } // namespace Emoji

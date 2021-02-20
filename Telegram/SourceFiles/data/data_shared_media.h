@@ -13,6 +13,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 class History;
 
+namespace Main {
+class Session;
+} // namespace Main
+
 std::optional<Storage::SharedMediaType> SharedMediaOverviewType(
 	Storage::SharedMediaType type);
 void SharedMediaShowOverview(
@@ -21,6 +25,7 @@ void SharedMediaShowOverview(
 bool SharedMediaAllowSearch(Storage::SharedMediaType type);
 
 rpl::producer<SparseIdsSlice> SharedMediaViewer(
+	not_null<Main::Session*> session,
 	Storage::SharedMediaKey key,
 	int limitBefore,
 	int limitAfter);
@@ -46,6 +51,7 @@ struct SharedMediaMergedKey {
 };
 
 rpl::producer<SparseIdsMergedSlice> SharedMediaMergedViewer(
+	not_null<Main::Session*> session,
 	SharedMediaMergedKey key,
 	int limitBefore,
 	int limitAfter);
@@ -54,9 +60,9 @@ class SharedMediaWithLastSlice {
 public:
 	using Type = Storage::SharedMediaType;
 
-	using Value = base::variant<FullMsgId, not_null<PhotoData*>>;
+	using Value = std::variant<FullMsgId, not_null<PhotoData*>>;
 	using MessageId = SparseIdsMergedSlice::UniversalMsgId;
-	using UniversalMsgId = base::variant<
+	using UniversalMsgId = std::variant<
 		MessageId,
 		not_null<PhotoData*>>;
 
@@ -70,8 +76,7 @@ public:
 		, migratedPeerId(migratedPeerId)
 		, type(type)
 		, universalId(universalId) {
-			Expects(base::get_if<MessageId>(&universalId) != nullptr
-				|| type == Type::ChatPhoto);
+			Expects(v::is<MessageId>(universalId) || type == Type::ChatPhoto);
 		}
 
 		bool operator==(const Key &other) const {
@@ -91,8 +96,11 @@ public:
 
 	};
 
-	SharedMediaWithLastSlice(Key key);
 	SharedMediaWithLastSlice(
+		not_null<Main::Session*> session,
+		Key key);
+	SharedMediaWithLastSlice(
+		not_null<Main::Session*> session,
 		Key key,
 		SparseIdsMergedSlice slice,
 		std::optional<SparseIdsMergedSlice> ending);
@@ -111,8 +119,8 @@ public:
 		return {
 			key.peerId,
 			key.migratedPeerId,
-			base::get_if<MessageId>(&key.universalId)
-				? (*base::get_if<MessageId>(&key.universalId))
+			v::is<MessageId>(key.universalId)
+				? v::get<MessageId>(key.universalId)
 				: ServerMaxMsgId - 1
 		};
 	}
@@ -126,13 +134,16 @@ public:
 
 private:
 	static std::optional<SparseIdsMergedSlice> EndingSlice(const Key &key) {
-		return base::get_if<MessageId>(&key.universalId)
+		return v::is<MessageId>(key.universalId)
 			? base::make_optional(SparseIdsMergedSlice(EndingKey(key)))
 			: std::nullopt;
 	}
 
-	static std::optional<PhotoId> LastPeerPhotoId(PeerId peerId);
+	static std::optional<PhotoId> LastPeerPhotoId(
+		not_null<Main::Session*> session,
+		PeerId peerId);
 	static std::optional<bool> IsLastIsolated(
+		not_null<Main::Session*> session,
 		const SparseIdsMergedSlice &slice,
 		const std::optional<SparseIdsMergedSlice> &ending,
 		std::optional<PhotoId> lastPeerPhotoId);
@@ -149,12 +160,12 @@ private:
 			msgId);
 	}
 	static Value ComputeId(const Key &key) {
-		if (auto messageId = base::get_if<MessageId>(&key.universalId)) {
+		if (const auto messageId = std::get_if<MessageId>(&key.universalId)) {
 			return (*messageId >= 0)
 				? ComputeId(key.peerId, *messageId)
 				: ComputeId(key.migratedPeerId, ServerMaxMsgId + *messageId);
 		}
-		return *base::get_if<not_null<PhotoData*>>(&key.universalId);
+		return v::get<not_null<PhotoData*>>(key.universalId);
 	}
 
 	bool isolatedInSlice() const {
@@ -169,6 +180,7 @@ private:
 	std::optional<int> skippedAfterImpl() const;
 	std::optional<int> indexOfImpl(Value fullId) const;
 
+	not_null<Main::Session*> _session;
 	Key _key;
 	SparseIdsMergedSlice _slice;
 	std::optional<SparseIdsMergedSlice> _ending;
@@ -179,11 +191,13 @@ private:
 };
 
 rpl::producer<SharedMediaWithLastSlice> SharedMediaWithLastViewer(
+	not_null<Main::Session*> session,
 	SharedMediaWithLastSlice::Key key,
 	int limitBefore,
 	int limitAfter);
 
 rpl::producer<SharedMediaWithLastSlice> SharedMediaWithLastReversedViewer(
+	not_null<Main::Session*> session,
 	SharedMediaWithLastSlice::Key key,
 	int limitBefore,
 	int limitAfter);

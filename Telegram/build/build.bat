@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 set "FullScriptPath=%~dp0"
 set "FullExecPath=%cd%"
 
-if not exist "%FullScriptPath%..\..\..\TelegramPrivate" (
+if not exist "%FullScriptPath%..\..\..\DesktopPrivate" (
   echo.
   echo This script is for building the production version of Telegram Desktop.
   echo.
@@ -16,8 +16,42 @@ FOR /F "tokens=1* delims= " %%i in (%FullScriptPath%target) do set "BuildTarget=
 
 if "%BuildTarget%" equ "uwp" (
   set "BuildUWP=1"
+) else if "%BuildTarget%" equ "uwp64" (
+  set "BuildUWP=1"
 ) else (
   set "BuildUWP=0"
+)
+
+if "%BuildTarget%" equ "win64" (
+  set "Build64=1"
+) else if "%BuildTarget%" equ "uwp64" (
+  set "Build64=1"
+) else (
+  set "Build64=0"
+)
+
+if %Build64% neq 0 (
+  if "%Platform%" neq "x64" (
+    echo Bad environment. Make sure to run from 'x64 Native Tools Command Prompt for VS 2019'.
+    exit /b
+  ) else if "%VSCMD_ARG_HOST_ARCH%" neq "x64" (
+    echo Bad environment. Make sure to run from 'x64 Native Tools Command Prompt for VS 2019'.
+    exit /b
+  ) else if "%VSCMD_ARG_TGT_ARCH%" neq "x64" (
+    echo Bad environment. Make sure to run from 'x64 Native Tools Command Prompt for VS 2019'.
+    exit /b
+  )
+) else (
+  if "%Platform%" neq "x86" (
+    echo Bad environment. Make sure to run from 'x86 Native Tools Command Prompt for VS 2019'.
+    exit /b
+  ) else if "%VSCMD_ARG_HOST_ARCH%" neq "x86" (
+    echo Bad environment. Make sure to run from 'x86 Native Tools Command Prompt for VS 2019'.
+    exit /b
+  ) else if "%VSCMD_ARG_TGT_ARCH%" neq "x86" (
+    echo Bad environment. Make sure to run from 'x86 Native Tools Command Prompt for VS 2019'.
+    exit /b
+  )
 )
 
 FOR /F "tokens=1,2* delims= " %%i in (%FullScriptPath%version) do set "%%i=%%j"
@@ -40,24 +74,40 @@ if %AlphaVersion% neq 0 (
 
 echo.
 if %BuildUWP% neq 0 (
-  echo Building version %AppVersionStrFull% for UWP..
+  if %Build64% neq 0 (
+    echo Building version %AppVersionStrFull% for UWP 64 bit..
+  ) else (
+    echo Building version %AppVersionStrFull% for UWP..
+  )
 ) else (
-  echo Building version %AppVersionStrFull% for Windows..
+  if %Build64% neq 0 (
+    echo Building version %AppVersionStrFull% for Windows 64 bit..
+  ) else (
+    echo Building version %AppVersionStrFull% for Windows..
+  )
 )
 echo.
 
 set "HomePath=%FullScriptPath%.."
 set "ResourcesPath=%HomePath%\Resources"
-set "SolutionPath=%HomePath%\.."
-set "UpdateFile=tupdate%AppVersion%"
-set "SetupFile=tsetup.%AppVersionStrFull%.exe"
-set "PortableFile=tportable.%AppVersionStrFull%.zip"
-set "ReleasePath=%HomePath%\..\out\Release"
+set "SolutionPath=%HomePath%\..\out"
+if %Build64% neq 0 (
+  set "UpdateFile=tx64upd%AppVersion%"
+  set "SetupFile=tsetup-x64.%AppVersionStrFull%.exe"
+  set "PortableFile=tportable-x64.%AppVersionStrFull%.zip"
+  set "DumpSymsPath=%SolutionPath%\..\..\Libraries\win64\breakpad\src\tools\windows\dump_syms\Release\dump_syms.exe"
+) else (
+  set "UpdateFile=tupdate%AppVersion%"
+  set "SetupFile=tsetup.%AppVersionStrFull%.exe"
+  set "PortableFile=tportable.%AppVersionStrFull%.zip"
+  set "DumpSymsPath=%SolutionPath%\..\..\Libraries\breakpad\src\tools\windows\dump_syms\Release\dump_syms.exe"
+)
+set "ReleasePath=%SolutionPath%\Release"
 set "DeployPath=%ReleasePath%\deploy\%AppVersionStrMajor%\%AppVersionStrFull%"
-set "SignPath=%HomePath%\..\..\TelegramPrivate\Sign.bat"
+set "SignPath=%HomePath%\..\..\DesktopPrivate\Sign.bat"
 set "BinaryName=Telegram"
 set "DropboxSymbolsPath=Y:\Telegram\symbols"
-set "FinalReleasePath=Z:\Telegram\backup"
+set "FinalReleasePath=Z:\Projects\backup\tdesktop"
 
 if not exist %DropboxSymbolsPath% (
   echo Dropbox path %DropboxSymbolsPath% not found!
@@ -105,26 +155,24 @@ if %AlphaVersion% neq 0 (
 
 cd "%HomePath%"
 
-call gyp\refresh.bat
+call configure.bat
 if %errorlevel% neq 0 goto error
 
 cd "%SolutionPath%"
-call ninja -C out/Release Telegram
+call cmake --build . --config Release --target Telegram
 if %errorlevel% neq 0 goto error
 
 echo.
 echo Version %AppVersionStrFull% build successfull. Preparing..
 echo.
 
-if not exist "%SolutionPath%\..\Libraries\breakpad\src\tools\windows\dump_syms\Release\dump_syms.exe" (
+if not exist "%DumpSymsPath%" (
   echo Utility dump_syms not found!
   exit /b 1
 )
 
 echo Dumping debug symbols..
-xcopy "%ReleasePath%\%BinaryName%.exe" "%ReleasePath%\%BinaryName%.exe.exe*"
-call "%SolutionPath%\..\Libraries\breakpad\src\tools\windows\dump_syms\Release\dump_syms.exe" "%ReleasePath%\%BinaryName%.exe.pdb" > "%ReleasePath%\%BinaryName%.exe.sym"
-del "%ReleasePath%\%BinaryName%.exe.exe"
+call "%DumpSymsPath%" "%ReleasePath%\%BinaryName%.pdb" > "%ReleasePath%\%BinaryName%.sym"
 echo Done!
 
 set "PATH=%PATH%;C:\Program Files\7-Zip;C:\Program Files (x86)\Inno Setup 5"
@@ -147,18 +195,18 @@ if %BuildUWP% equ 0 (
   )
 
   if %AlphaVersion% equ 0 (
-    iscc /dMyAppVersion=%AppVersionStrSmall% /dMyAppVersionZero=%AppVersionStr% /dMyAppVersionFull=%AppVersionStrFull% "/dReleasePath=%ReleasePath%" "%FullScriptPath%setup.iss"
+    iscc /dMyAppVersion=%AppVersionStrSmall% /dMyAppVersionZero=%AppVersionStr% /dMyAppVersionFull=%AppVersionStrFull% "/dReleasePath=%ReleasePath%" "/dMyBuildTarget=%BuildTarget%" "%FullScriptPath%setup.iss"
     if %errorlevel% neq 0 goto error
-    if not exist "tsetup.%AppVersionStrFull%.exe" goto error
+    if not exist "%SetupFile%" goto error
 :sign3
-    call "%SignPath%" "tsetup.%AppVersionStrFull%.exe"
+    call "%SignPath%" "%SetupFile%"
     if %errorlevel% neq 0 (
       timeout /t 3
       goto sign3
     )
   )
 
-  call Packer.exe -version %VersionForPacker% -path %BinaryName%.exe -path Updater.exe %AlphaBetaParam%
+  call Packer.exe -version %VersionForPacker% -path %BinaryName%.exe -path Updater.exe -target %BuildTarget% %AlphaBetaParam%
   if %errorlevel% neq 0 goto error
 
   if %AlphaVersion% neq 0 (
@@ -179,61 +227,56 @@ if %BuildUWP% equ 0 (
 
 for /f ^"usebackq^ eol^=^
 
-^ delims^=^" %%a in (%ReleasePath%\%BinaryName%.exe.sym) do (
+^ delims^=^" %%a in (%ReleasePath%\%BinaryName%.sym) do (
   set "SymbolsHashLine=%%a"
   goto symbolslinedone
 )
 :symbolslinedone
 FOR /F "tokens=1,2,3,4* delims= " %%i in ("%SymbolsHashLine%") do set "SymbolsHash=%%l"
 
-echo Copying %BinaryName%.exe.sym to %DropboxSymbolsPath%\%BinaryName%.exe.pdb\%SymbolsHash%
-if not exist %DropboxSymbolsPath%\%BinaryName%.exe.pdb mkdir %DropboxSymbolsPath%\%BinaryName%.exe.pdb
-if not exist %DropboxSymbolsPath%\%BinaryName%.exe.pdb\%SymbolsHash% mkdir %DropboxSymbolsPath%\%BinaryName%.exe.pdb\%SymbolsHash%
-move "%ReleasePath%\%BinaryName%.exe.sym" %DropboxSymbolsPath%\%BinaryName%.exe.pdb\%SymbolsHash%\
+echo Copying %BinaryName%.sym to %DropboxSymbolsPath%\%BinaryName%.pdb\%SymbolsHash%
+if not exist %DropboxSymbolsPath%\%BinaryName%.pdb mkdir %DropboxSymbolsPath%\%BinaryName%.pdb
+if not exist %DropboxSymbolsPath%\%BinaryName%.pdb\%SymbolsHash% mkdir %DropboxSymbolsPath%\%BinaryName%.pdb\%SymbolsHash%
+move "%ReleasePath%\%BinaryName%.sym" %DropboxSymbolsPath%\%BinaryName%.pdb\%SymbolsHash%\
 echo Done!
 
 if %BuildUWP% neq 0 (
   cd "%HomePath%"
 
-  mkdir "%ReleasePath%\AppX_x86"
-  xcopy "Resources\uwp\AppX\*" "%ReleasePath%\AppX_x86\" /E
-  set "ResourcePath=%ReleasePath%\AppX_x86\AppxManifest.xml"
-  call :repl "Argument= (ProcessorArchitecture=)&quot;ARCHITECTURE&quot;/ $1&quot;x86&quot;" "Filename=!ResourcePath!" || goto error
-
-  makepri new /pr Resources\uwp\AppX\ /cf Resources\uwp\priconfig.xml /mn %ReleasePath%\AppX_x86\AppxManifest.xml /of %ReleasePath%\AppX_x86\resources.pri
+  mkdir "%ReleasePath%\AppX"
+  xcopy "Resources\uwp\AppX\*" "%ReleasePath%\AppX\" /E
+  set "ResourcePath=%ReleasePath%\AppX\AppxManifest.xml"
+  if %Build64% equ 0 (
+    call :repl "Argument= (ProcessorArchitecture=)&quot;ARCHITECTURE&quot;/ $1&quot;x86&quot;" "Filename=!ResourcePath!" || goto error
+  ) else (
+    call :repl "Argument= (ProcessorArchitecture=)&quot;ARCHITECTURE&quot;/ $1&quot;x64&quot;" "Filename=!ResourcePath!" || goto error
+  )
+  makepri new /pr Resources\uwp\AppX\ /cf Resources\uwp\priconfig.xml /mn %ReleasePath%\AppX\AppxManifest.xml /of %ReleasePath%\AppX\resources.pri
   if %errorlevel% neq 0 goto error
 
-  xcopy "%ReleasePath%\%BinaryName%.exe" "%ReleasePath%\AppX_x86\"
+  xcopy "%ReleasePath%\%BinaryName%.exe" "%ReleasePath%\AppX\"
 
-  MakeAppx.exe pack /d "%ReleasePath%\AppX_x86" /l /p ..\out\Release\%BinaryName%.x86.appx
-  if %errorlevel% neq 0 goto error
-
-  mkdir "%ReleasePath%\AppX_x64"
-  xcopy "Resources\uwp\AppX\*" "%ReleasePath%\AppX_x64\" /E
-  set "ResourcePath=%ReleasePath%\AppX_x64\AppxManifest.xml"
-  call :repl "Argument= (ProcessorArchitecture=)&quot;ARCHITECTURE&quot;/ $1&quot;x64&quot;" "Filename=!ResourcePath!" || goto error
-
-  makepri new /pr Resources\uwp\AppX\ /cf Resources\uwp\priconfig.xml /mn %ReleasePath%\AppX_x64\AppxManifest.xml /of %ReleasePath%\AppX_x64\resources.pri
-  if %errorlevel% neq 0 goto error
-
-  xcopy "%ReleasePath%\%BinaryName%.exe" "%ReleasePath%\AppX_x64\"
-
-  MakeAppx.exe pack /d "%ReleasePath%\AppX_x64" /l /p ..\out\Release\%BinaryName%.x64.appx
+  if %Build64% equ 0 (
+    MakeAppx.exe pack /d "%ReleasePath%\AppX" /l /p ..\out\Release\%BinaryName%.x86.appx
+  ) else (
+    MakeAppx.exe pack /d "%ReleasePath%\AppX" /l /p ..\out\Release\%BinaryName%.x64.appx
+  )
   if %errorlevel% neq 0 goto error
 
   if not exist "%ReleasePath%\deploy" mkdir "%ReleasePath%\deploy"
   if not exist "%ReleasePath%\deploy\%AppVersionStrMajor%" mkdir "%ReleasePath%\deploy\%AppVersionStrMajor%"
   mkdir "%DeployPath%"
 
-  xcopy "%ReleasePath%\%BinaryName%.pdb" "%DeployPath%\"
-  move "%ReleasePath%\%BinaryName%.exe.pdb" "%DeployPath%\"
-  move "%ReleasePath%\%BinaryName%.x86.appx" "%DeployPath%\"
-  move "%ReleasePath%\%BinaryName%.x64.appx" "%DeployPath%\"
+  move "%ReleasePath%\%BinaryName%.pdb" "%DeployPath%\"
+  if %Build64% equ 0 (
+    move "%ReleasePath%\%BinaryName%.x86.appx" "%DeployPath%\"
+  ) else (
+    move "%ReleasePath%\%BinaryName%.x64.appx" "%DeployPath%\"
+  )
   move "%ReleasePath%\%BinaryName%.exe" "%DeployPath%\"
 
   if "%AlphaBetaParam%" equ "" (
-    move "%ReleasePath%\AppX_x86" "%DeployPath%\AppX_x86"
-    move "%ReleasePath%\AppX_x64" "%DeployPath%\AppX_x64"
+    move "%ReleasePath%\AppX" "%DeployPath%\AppX"
   ) else (
     echo Leaving result in out\Release\AppX_arch for now..
   )
@@ -246,10 +289,8 @@ if %BuildUWP% neq 0 (
 
   move "%ReleasePath%\%BinaryName%.exe" "%DeployPath%\%BinaryName%\"
   move "%ReleasePath%\Updater.exe" "%DeployPath%\"
-  xcopy "%ReleasePath%\%BinaryName%.pdb" "%DeployPath%\"
-  xcopy "%ReleasePath%\Updater.pdb" "%DeployPath%\"
-  move "%ReleasePath%\%BinaryName%.exe.pdb" "%DeployPath%\"
-  move "%ReleasePath%\Updater.exe.pdb" "%DeployPath%\"
+  move "%ReleasePath%\%BinaryName%.pdb" "%DeployPath%\"
+  move "%ReleasePath%\Updater.pdb" "%DeployPath%\"
   if %AlphaVersion% equ 0 (
     move "%ReleasePath%\%SetupFile%" "%DeployPath%\"
   ) else (
@@ -267,7 +308,11 @@ if %BuildUWP% neq 0 (
   if %errorlevel% neq 0 goto error
 )
 
-set "FinalDeployPath=%FinalReleasePath%\%AppVersionStrMajor%\%AppVersionStrFull%\tsetup"
+if %Build64% equ 0 (
+  set "FinalDeployPath=%FinalReleasePath%\%AppVersionStrMajor%\%AppVersionStrFull%\tsetup"
+) else (
+  set "FinalDeployPath=%FinalReleasePath%\%AppVersionStrMajor%\%AppVersionStrFull%\tx64"
+)
 
 if %BuildUWP% equ 0 (
   echo.
@@ -280,10 +325,8 @@ if %BuildUWP% equ 0 (
     if not exist "%DeployPath%\%SetupFile%" goto error
   )
   if not exist "%DeployPath%\%BinaryName%.pdb" goto error
-  if not exist "%DeployPath%\%BinaryName%.exe.pdb" goto error
   if not exist "%DeployPath%\Updater.exe" goto error
   if not exist "%DeployPath%\Updater.pdb" goto error
-  if not exist "%DeployPath%\Updater.exe.pdb" goto error
   md "%FinalDeployPath%"
 
   xcopy "%DeployPath%\%UpdateFile%" "%FinalDeployPath%\" /Y

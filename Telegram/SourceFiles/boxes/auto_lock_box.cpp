@@ -9,9 +9,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include "lang/lang_keys.h"
 #include "storage/localstorage.h"
+#include "core/application.h"
 #include "mainwindow.h"
 #include "ui/widgets/checkbox.h"
 #include "facades.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
 
 AutoLockBox::AutoLockBox(QWidget*, not_null<Main::Session*> session)
@@ -25,7 +27,8 @@ void AutoLockBox::prepare() {
 
 	auto options = { 60, 300, 3600, 18000 };
 
-	auto group = std::make_shared<Ui::RadiobuttonGroup>(Global::AutoLock());
+	auto group = std::make_shared<Ui::RadiobuttonGroup>(
+		Core::App().settings().autoLock());
 	auto y = st::boxOptionListPadding.top() + st::autolockButton.margin.top();
 	auto count = int(options.size());
 	_options.reserve(count);
@@ -40,10 +43,10 @@ void AutoLockBox::prepare() {
 }
 
 void AutoLockBox::durationChanged(int seconds) {
-	Global::SetAutoLock(seconds);
-	Local::writeUserSettings();
+	Core::App().settings().setAutoLock(seconds);
+	Core::App().saveSettingsDelayed();
 	Global::RefLocalPasscodeChanged().notify();
 
-	_session->checkAutoLock();
+	Core::App().checkAutoLock();
 	closeBox();
 }

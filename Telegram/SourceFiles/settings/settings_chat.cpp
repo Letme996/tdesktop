@@ -13,7 +13,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/stickers_box.h"
 #include "boxes/confirm_box.h"
 #include "boxes/background_box.h"
-#include "boxes/generic_box.h"
 #include "boxes/background_preview_box.h"
 #include "boxes/download_path_box.h"
 #include "boxes/local_storage_box.h"
@@ -22,35 +21,41 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/wrap/slide_wrap.h"
 #include "ui/widgets/input_fields.h"
 #include "ui/widgets/checkbox.h"
+#include "ui/widgets/buttons.h"
 #include "ui/widgets/labels.h"
+#include "ui/chat/attach/attach_extensions.h"
+#include "ui/layers/generic_box.h"
 #include "ui/effects/radial_animation.h"
 #include "ui/toast/toast.h"
 #include "ui/image/image.h"
-#include "ui/image/image_source.h"
 #include "lang/lang_keys.h"
+#include "export/export_manager.h"
 #include "window/themes/window_theme.h"
 #include "window/themes/window_themes_embedded.h"
 #include "window/themes/window_theme_editor_box.h"
 #include "window/themes/window_themes_cloud_list.h"
 #include "window/window_session_controller.h"
 #include "window/window_controller.h"
-#include "info/profile/info_profile_button.h"
 #include "storage/localstorage.h"
 #include "core/file_utilities.h"
 #include "core/application.h"
 #include "data/data_session.h"
 #include "data/data_cloud_themes.h"
+#include "data/data_file_origin.h"
 #include "chat_helpers/emoji_sets_manager.h"
-#include "platform/platform_info.h"
+#include "base/platform/base_platform_info.h"
+#include "platform/platform_specific.h"
+#include "base/call_delayed.h"
 #include "support/support_common.h"
 #include "support/support_templates.h"
 #include "main/main_session.h"
+#include "main/main_session_settings.h"
 #include "mainwidget.h"
 #include "mainwindow.h"
 #include "facades.h"
 #include "app.h"
 #include "styles/style_settings.h"
-#include "styles/style_boxes.h"
+#include "styles/style_layers.h"
 
 namespace Settings {
 namespace {
@@ -194,7 +199,7 @@ void ColorsPalette::Button::update(
 }
 
 rpl::producer<> ColorsPalette::Button::clicks() const {
-	return _widget.clicks() | rpl::map([] { return rpl::empty_value(); });
+	return _widget.clicks() | rpl::to_empty;
 }
 
 bool ColorsPalette::Button::selected() const {
@@ -383,6 +388,7 @@ private:
 	crl::time radialTimeShift() const;
 	void radialAnimationCallback(crl::time now);
 
+	const not_null<Window::SessionController*> _controller;
 	QPixmap _background;
 	object_ptr<Ui::LinkButton> _chooseFromGallery;
 	object_ptr<Ui::LinkButton> _chooseFromFile;
@@ -392,13 +398,14 @@ private:
 };
 
 void ChooseFromFile(
-	not_null<::Main::Session*> session,
+	not_null<Window::SessionController*> controller,
 	not_null<QWidget*> parent);
 
 BackgroundRow::BackgroundRow(
 	QWidget *parent,
 	not_null<Window::SessionController*> controller)
 : RpWidget(parent)
+, _controller(controller)
 , _chooseFromGallery(
 	this,
 	tr::lng_settings_bg_from_gallery(tr::now),
@@ -408,10 +415,10 @@ BackgroundRow::BackgroundRow(
 	updateImage();
 
 	_chooseFromGallery->addClickHandler([=] {
-		Ui::show(Box<BackgroundBox>(&controller->session()));
+		Ui::show(Box<BackgroundBox>(controller));
 	});
 	_chooseFromFile->addClickHandler([=] {
-		ChooseFromFile(&controller->session(), this);
+		ChooseFromFile(controller, this);
 	});
 
 	using Update = const Window::Theme::BackgroundUpdate;
@@ -432,12 +439,11 @@ void BackgroundRow::paintEvent(QPaintEvent *e) {
 	const auto radial = _radial.animating();
 	const auto radialOpacity = radial ? _radial.opacity() : 0.;
 	if (radial) {
-		const auto backThumb = App::main()->newBackgroundThumb();
+		const auto backThumb = _controller->content()->newBackgroundThumb();
 		if (!backThumb) {
 			p.drawPixmap(0, 0, _background);
 		} else {
 			const auto &pix = backThumb->pixBlurred(
-				Data::FileOrigin(),
 				st::settingsBackgroundThumb);
 			const auto factor = cIntRetinaFactor();
 			p.drawPixmap(
@@ -494,14 +500,14 @@ int BackgroundRow::resizeGetHeight(int newWidth) {
 }
 
 float64 BackgroundRow::radialProgress() const {
-	return App::main()->chatBackgroundProgress();
+	return _controller->content()->chatBackgroundProgress();
 }
 
 bool BackgroundRow::radialLoading() const {
-	const auto main = App::main();
-	if (main->chatBackgroundLoading()) {
-		main->checkChatBackground();
-		if (main->chatBackgroundLoading()) {
+	const auto widget = _controller->content();
+	if (widget->chatBackgroundLoading()) {
+		widget->checkChatBackground();
+		if (widget->chatBackgroundLoading()) {
 			return true;
 		} else {
 			const_cast<BackgroundRow*>(this)->updateImage();
@@ -594,15 +600,14 @@ void BackgroundRow::updateImage() {
 }
 
 void ChooseFromFile(
-		not_null<::Main::Session*> session,
+		not_null<Window::SessionController*> controller,
 		not_null<QWidget*> parent) {
-	const auto &imgExtensions = cImgExtensions();
 	auto filters = QStringList(
 		qsl("Theme files (*.tdesktop-theme *.tdesktop-palette *")
-		+ imgExtensions.join(qsl(" *"))
+		+ Ui::ImageExtensions().join(qsl(" *"))
 		+ qsl(")"));
 	filters.push_back(FileDialog::AllFilesFilter());
-	const auto callback = crl::guard(session, [=](
+	const auto callback = crl::guard(controller, [=](
 			const FileDialog::OpenResult &result) {
 		if (result.paths.isEmpty() && result.remoteContent.isEmpty()) {
 			return;
@@ -628,25 +633,14 @@ void ChooseFromFile(
 		}
 		auto local = Data::CustomWallPaper();
 		local.setLocalImageAsThumbnail(std::make_shared<Image>(
-			std::make_unique<Images::ImageSource>(
-				std::move(image),
-				"JPG")));
-		Ui::show(Box<BackgroundPreviewBox>(session, local));
+			std::move(image)));
+		Ui::show(Box<BackgroundPreviewBox>(controller, local));
 	});
 	FileDialog::GetOpenPath(
 		parent.get(),
 		tr::lng_choose_image(tr::now),
 		filters.join(qsl(";;")),
 		crl::guard(parent, callback));
-}
-
-QString DownloadPathText() {
-	if (Global::DownloadPath().isEmpty()) {
-		return tr::lng_download_path_default(tr::now);
-	} else if (Global::DownloadPath() == qsl("tmp")) {
-		return tr::lng_download_path_temp(tr::now);
-	}
-	return QDir::toNativeSeparators(Global::DownloadPath());
 }
 
 void SetupStickersEmoji(
@@ -685,42 +679,42 @@ void SetupStickersEmoji(
 
 	add(
 		tr::lng_settings_large_emoji(tr::now),
-		session->settings().largeEmoji(),
+		Core::App().settings().largeEmoji(),
 		[=](bool checked) {
-			session->settings().setLargeEmoji(checked);
-			session->saveSettingsDelayed();
+			Core::App().settings().setLargeEmoji(checked);
+			Core::App().saveSettingsDelayed();
 		});
 
 	add(
 		tr::lng_settings_replace_emojis(tr::now),
-		session->settings().replaceEmoji(),
+		Core::App().settings().replaceEmoji(),
 		[=](bool checked) {
-			session->settings().setReplaceEmoji(checked);
-			session->saveSettingsDelayed();
+			Core::App().settings().setReplaceEmoji(checked);
+			Core::App().saveSettingsDelayed();
 		});
 
 	add(
 		tr::lng_settings_suggest_emoji(tr::now),
-		session->settings().suggestEmoji(),
+		Core::App().settings().suggestEmoji(),
 		[=](bool checked) {
-			session->settings().setSuggestEmoji(checked);
-			session->saveSettingsDelayed();
+			Core::App().settings().setSuggestEmoji(checked);
+			Core::App().saveSettingsDelayed();
 		});
 
 	add(
 		tr::lng_settings_suggest_by_emoji(tr::now),
-		session->settings().suggestStickersByEmoji(),
+		Core::App().settings().suggestStickersByEmoji(),
 		[=](bool checked) {
-			session->settings().setSuggestStickersByEmoji(checked);
-			session->saveSettingsDelayed();
+			Core::App().settings().setSuggestStickersByEmoji(checked);
+			Core::App().saveSettingsDelayed();
 		});
 
 	add(
 		tr::lng_settings_loop_stickers(tr::now),
-		session->settings().loopAnimatedStickers(),
+		Core::App().settings().loopAnimatedStickers(),
 		[=](bool checked) {
-			session->settings().setLoopAnimatedStickers(checked);
-			session->saveSettingsDelayed();
+			Core::App().settings().setLoopAnimatedStickers(checked);
+			Core::App().saveSettingsDelayed();
 		});
 
 	AddButton(
@@ -730,7 +724,8 @@ void SetupStickersEmoji(
 		&st::settingsIconStickers,
 		st::settingsChatIconLeft
 	)->addClickHandler([=] {
-		Ui::show(Box<StickersBox>(session, StickersBox::Section::Installed));
+		Ui::show(
+			Box<StickersBox>(controller, StickersBox::Section::Installed));
 	});
 
 	AddButton(
@@ -739,8 +734,8 @@ void SetupStickersEmoji(
 		st::settingsChatButton,
 		&st::settingsIconEmoji,
 		st::settingsChatIconLeft
-	)->addClickHandler([] {
-		Ui::show(Box<Ui::Emoji::ManageSetsBox>());
+	)->addClickHandler([=] {
+		Ui::show(Box<Ui::Emoji::ManageSetsBox>(session));
 	});
 
 	AddSkip(container, st::settingsCheckboxesSkip);
@@ -768,7 +763,7 @@ void SetupMessages(
 			QMargins(0, skip, 0, skip)));
 
 	const auto group = std::make_shared<Ui::RadioenumGroup<SendByType>>(
-		controller->session().settings().sendSubmitWay());
+		Core::App().settings().sendSubmitWay());
 	const auto add = [&](SendByType value, const QString &text) {
 		inner->add(
 			object_ptr<Ui::Radioenum<SendByType>>(
@@ -789,11 +784,9 @@ void SetupMessages(
 			: tr::lng_settings_send_ctrlenter(tr::now)));
 
 	group->setChangedCallback([=](SendByType value) {
-		controller->session().settings().setSendSubmitWay(value);
-		if (App::main()) {
-			App::main()->ctrlEnterSubmitUpdated();
-		}
-		Local::writeUserSettings();
+		Core::App().settings().setSendSubmitWay(value);
+		Core::App().saveSettingsDelayed();
+		controller->content()->ctrlEnterSubmitUpdated();
 	});
 
 	AddSkip(inner, st::settingsCheckboxesSkip);
@@ -809,10 +802,10 @@ void SetupExport(
 	)->addClickHandler([=] {
 		const auto session = &controller->session();
 		Ui::hideSettingsAndLayer();
-		App::CallDelayed(
+		base::call_delayed(
 			st::boxDuration,
 			session,
-			[=] { session->data().startExport(); });
+			[=] { Core::App().exportManager().start(session); });
 	});
 }
 
@@ -842,7 +835,7 @@ void SetupDataStorage(
 		container,
 		tr::lng_download_path_ask(),
 		st::settingsButton
-	)->toggleOn(rpl::single(Global::AskDownloadPath()));
+	)->toggleOn(rpl::single(Core::App().settings().askDownloadPath()));
 
 #ifndef OS_WIN_STORE
 	const auto showpath = Ui::CreateChild<rpl::event_stream<bool>>(ask);
@@ -853,30 +846,32 @@ void SetupDataStorage(
 				container,
 				tr::lng_download_path(),
 				st::settingsButton)));
-	auto pathtext = rpl::single(
-		rpl::empty_value()
-	) | rpl::then(base::ObservableViewer(
-		Global::RefDownloadPathChanged()
-	)) | rpl::map([] {
-		return DownloadPathText();
+	auto pathtext = Core::App().settings().downloadPathValue(
+	) | rpl::map([](const QString &text) {
+		if (text.isEmpty()) {
+			return tr::lng_download_path_default(tr::now);
+		} else if (text == qsl("tmp")) {
+			return tr::lng_download_path_temp(tr::now);
+		}
+		return QDir::toNativeSeparators(text);
 	});
 	CreateRightLabel(
 		path->entity(),
 		std::move(pathtext),
 		st::settingsButton,
 		tr::lng_download_path());
-	path->entity()->addClickHandler([] {
-		Ui::show(Box<DownloadPathBox>());
+	path->entity()->addClickHandler([=] {
+		Ui::show(Box<DownloadPathBox>(controller));
 	});
 	path->toggleOn(ask->toggledValue() | rpl::map(!_1));
 #endif // OS_WIN_STORE
 
 	ask->toggledValue(
 	) | rpl::filter([](bool checked) {
-		return (checked != Global::AskDownloadPath());
+		return (checked != Core::App().settings().askDownloadPath());
 	}) | rpl::start_with_next([=](bool checked) {
-		Global::SetAskDownloadPath(checked);
-		Local::writeUserSettings();
+		Core::App().settings().setAskDownloadPath(checked);
+		Core::App().saveSettingsDelayed();
 
 #ifndef OS_WIN_STORE
 		showpath->fire_copy(!checked);
@@ -952,7 +947,7 @@ void SetupChatBackground(
 			object_ptr<Ui::Checkbox>(
 				inner,
 				tr::lng_settings_adaptive_wide(tr::now),
-				Global::AdaptiveForWide(),
+				Core::App().settings().adaptiveForWide(),
 				st::settingsCheckbox),
 			st::settingsSendTypePadding));
 
@@ -981,14 +976,16 @@ void SetupChatBackground(
 	}));
 
 	adaptive->entity()->checkedChanges(
-	) | rpl::start_with_next([](bool checked) {
-		Global::SetAdaptiveForWide(checked);
+	) | rpl::start_with_next([=](bool checked) {
+		Core::App().settings().setAdaptiveForWide(checked);
+		Core::App().saveSettingsDelayed();
 		Adaptive::Changed().notify();
-		Local::writeUserSettings();
 	}, adaptive->lifetime());
 }
 
-void SetupDefaultThemes(not_null<Ui::VerticalLayout*> container) {
+void SetupDefaultThemes(
+		not_null<Window::Controller*> window,
+		not_null<Ui::VerticalLayout*> container) {
 	using Type = Window::Theme::EmbeddedType;
 	using Scheme = Window::Theme::EmbeddedScheme;
 	using Check = Window::Theme::CloudListCheck;
@@ -1021,13 +1018,18 @@ void SetupDefaultThemes(not_null<Ui::VerticalLayout*> container) {
 		};
 		const auto currentlyIsCustom = (chosen() == Type(-1))
 			&& !Background()->themeObject().cloud.id;
+		const auto keep = [=] {
+			if (!currentlyIsCustom) {
+				KeepApplied();
+			}
+		};
 		if (IsNightMode() == isNight(scheme)) {
 			ApplyDefaultWithPath(scheme.path);
+			keep();
 		} else {
-			ToggleNightMode(scheme.path);
-		}
-		if (!currentlyIsCustom) {
-			KeepApplied();
+			Window::Theme::ToggleNightModeWithConfirmation(
+				window,
+				[=, path = scheme.path] { ToggleNightMode(path); keep();});
 		}
 	};
 	const auto schemeClicked = [=](
@@ -1051,6 +1053,10 @@ void SetupDefaultThemes(not_null<Ui::VerticalLayout*> container) {
 			scheme.name(tr::now),
 			st::settingsTheme,
 			std::move(check));
+		scheme.name(
+		) | rpl::start_with_next([=](const auto &themeName) {
+			result->setText(themeName);
+		}, result->lifetime());
 		result->addClickHandler([=] {
 			schemeClicked(scheme, result->clickModifiers());
 		});
@@ -1169,7 +1175,7 @@ void SetupThemeOptions(
 	AddSubsectionTitle(container, tr::lng_settings_themes());
 
 	AddSkip(container, st::settingsThemesTopSkip);
-	SetupDefaultThemes(container);
+	SetupDefaultThemes(&controller->window(), container);
 	AddSkip(container);
 }
 
@@ -1266,6 +1272,53 @@ void SetupCloudThemes(
 	wrap->setDuration(0)->toggleOn(list->empty() | rpl::map(!_1));
 }
 
+void SetupAutoNightMode(not_null<Ui::VerticalLayout*> container) {
+	if (!Platform::IsDarkModeSupported()) {
+		return;
+	}
+
+	AddDivider(container);
+	AddSkip(container, st::settingsPrivacySkip);
+
+	AddSubsectionTitle(container, tr::lng_settings_auto_night_mode());
+
+	auto wrap = object_ptr<Ui::VerticalLayout>(container);
+	const auto autoNight = wrap->add(
+		object_ptr<Ui::Checkbox>(
+			wrap,
+			tr::lng_settings_auto_night_enabled(tr::now),
+			Core::App().settings().systemDarkModeEnabled(),
+			st::settingsCheckbox),
+		st::settingsCheckboxPadding);
+
+	autoNight->checkedChanges(
+	) | rpl::filter([=](bool checked) {
+		return (checked != Core::App().settings().systemDarkModeEnabled());
+	}) | rpl::start_with_next([=](bool checked) {
+		if (checked && Window::Theme::Background()->editingTheme()) {
+			autoNight->setChecked(false);
+			Ui::show(Box<InformBox>(
+				tr::lng_theme_editor_cant_change_theme(tr::now)));
+		} else {
+			Core::App().settings().setSystemDarkModeEnabled(checked);
+			Core::App().saveSettingsDelayed();
+		}
+	}, autoNight->lifetime());
+
+	Core::App().settings().systemDarkModeEnabledChanges(
+	) | rpl::filter([=](bool value) {
+		return (value != autoNight->checked());
+	}) | rpl::start_with_next([=](bool value) {
+		autoNight->setChecked(value);
+	}, autoNight->lifetime());
+
+	container->add(object_ptr<Ui::OverrideMargins>(
+		container,
+		std::move(wrap)));
+
+	AddSkip(container, st::settingsCheckboxesSkip);
+}
+
 void SetupSupportSwitchSettings(
 		not_null<Window::SessionController*> controller,
 		not_null<Ui::VerticalLayout*> container) {
@@ -1287,7 +1340,7 @@ void SetupSupportSwitchSettings(
 	add(SwitchType::Previous, "Send and switch to previous");
 	group->setChangedCallback([=](SwitchType value) {
 		controller->session().settings().setSupportSwitch(value);
-		Local::writeUserSettings();
+		controller->session().saveSettingsDelayed();
 	});
 }
 
@@ -1327,7 +1380,7 @@ void SetupSupportChatsLimitSlice(
 	group->setChangedCallback([=](int days) {
 		controller->session().settings().setSupportChatsTimeSlice(
 			days * kDayDuration);
-		Local::writeUserSettings();
+		controller->session().saveSettingsDelayed();
 	});
 }
 
@@ -1364,7 +1417,21 @@ void SetupSupport(
 	) | rpl::start_with_next([=](bool checked) {
 		controller->session().settings().setSupportTemplatesAutocomplete(
 			checked);
-		Local::writeUserSettings();
+		controller->session().saveSettingsDelayed();
+	}, inner->lifetime());
+
+	inner->add(
+		object_ptr<Ui::Checkbox>(
+			inner,
+			"Send all messages without sound",
+			controller->session().settings().supportAllSilent(),
+			st::settingsCheckbox),
+		st::settingsSendTypePadding
+	)->checkedChanges(
+	) | rpl::start_with_next([=](bool checked) {
+		controller->session().settings().setSupportAllSilent(
+			checked);
+		controller->session().saveSettingsDelayed();
 	}, inner->lifetime());
 
 	AddSkip(inner, st::settingsCheckboxesSkip);
@@ -1387,6 +1454,7 @@ void Chat::setupContent(not_null<Window::SessionController*> controller) {
 	const auto content = Ui::CreateChild<Ui::VerticalLayout>(this);
 
 	SetupThemeOptions(controller, content);
+	SetupAutoNightMode(content);
 	SetupCloudThemes(controller, content);
 	SetupChatBackground(controller, content);
 	SetupStickersEmoji(controller, content);

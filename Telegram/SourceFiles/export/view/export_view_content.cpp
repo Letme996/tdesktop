@@ -7,15 +7,18 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "export/view/export_view_content.h"
 
+#include "export/export_settings.h"
 #include "lang/lang_keys.h"
-#include "layout.h"
+#include "ui/text/format_values.h"
 
 namespace Export {
 namespace View {
 
 const QString Content::kDoneId = "done";
 
-Content ContentFromState(const ProcessingState &state) {
+Content ContentFromState(
+		not_null<Settings*> settings,
+		const ProcessingState &state) {
 	using Step = ProcessingState::Step;
 
 	auto result = Content();
@@ -58,7 +61,7 @@ Content ContentFromState(const ProcessingState &state) {
 			return;
 		}
 		const auto progress = state.bytesLoaded / float64(state.bytesCount);
-		const auto info = formatDownloadText(
+		const auto info = Ui::FormatDownloadText(
 			state.bytesLoaded,
 			state.bytesCount);
 		push(id, label, info, progress);
@@ -89,14 +92,18 @@ Content ContentFromState(const ProcessingState &state) {
 		pushMain(tr::lng_export_option_other(tr::now));
 		break;
 	case Step::Dialogs:
-		pushMain(tr::lng_export_state_chats(tr::now));
+		if (state.entityCount > 1) {
+			pushMain(tr::lng_export_state_chats(tr::now));
+		}
 		push(
 			"chat" + QString::number(state.entityIndex),
 			(state.entityName.isEmpty()
 				? tr::lng_deleted(tr::now)
 				: (state.entityType == ProcessingState::EntityType::Chat)
 				? state.entityName
-				: tr::lng_saved_messages(tr::now)),
+				: (state.entityType == ProcessingState::EntityType::SavedMessages)
+				? tr::lng_saved_messages(tr::now)
+				: tr::lng_replies_messages(tr::now)),
 			(state.itemCount > 0
 				? (QString::number(state.itemIndex)
 					+ " / "
@@ -114,7 +121,8 @@ Content ContentFromState(const ProcessingState &state) {
 		break;
 	default: Unexpected("Step in ContentFromState.");
 	}
-	while (result.rows.size() < 3) {
+	const auto requiredRows = settings->onlySinglePeer() ? 2 : 3;
+	while (result.rows.size() < requiredRows) {
 		result.rows.emplace_back();
 	}
 	return result;
@@ -140,7 +148,7 @@ Content ContentFromState(const FinishedState &state) {
 		tr::lng_export_total_size(
 			tr::now,
 			lt_size,
-			formatSizeText(state.bytesCount)),
+			Ui::FormatSizeText(state.bytesCount)),
 		QString(),
 		1. });
 	return result;

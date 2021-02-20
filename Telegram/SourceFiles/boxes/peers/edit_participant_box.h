@@ -10,12 +10,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/abstract_box.h"
 #include "base/unique_qptr.h"
 
+class RPCError;
+
 namespace Ui {
 class FlatLabel;
 class LinkButton;
 class Checkbox;
 class Radiobutton;
 class RadiobuttonGroup;
+class CalendarBox;
 template <typename Widget>
 class SlideWrap;
 } // namespace Ui
@@ -24,10 +27,9 @@ namespace Core {
 struct CloudPasswordResult;
 } // namespace Core
 
-class CalendarBox;
 class PasscodeBox;
 
-class EditParticipantBox : public BoxContent {
+class EditParticipantBox : public Ui::BoxContent {
 public:
 	EditParticipantBox(
 		QWidget*,
@@ -87,7 +89,7 @@ private:
 	using Flag = MTPDchatAdminRights::Flag;
 	using Flags = MTPDchatAdminRights::Flags;
 
-	static MTPChatAdminRights Defaults(not_null<PeerData*> peer);
+	[[nodiscard]] MTPChatAdminRights defaultRights() const;
 
 	not_null<Ui::InputField*> addRankInput();
 	void transferOwnership();
@@ -142,7 +144,7 @@ private:
 	using Flag = MTPDchatBannedRights::Flag;
 	using Flags = MTPDchatBannedRights::Flags;
 
-	static MTPChatBannedRights Defaults(not_null<PeerData*> peer);
+	[[nodiscard]] MTPChatBannedRights defaultRights() const;
 
 	bool canSave() const {
 		return !!_saveCallback;
@@ -160,7 +162,7 @@ private:
 
 	std::shared_ptr<Ui::RadiobuttonGroup> _untilGroup;
 	std::vector<base::unique_qptr<Ui::Radiobutton>> _untilVariants;
-	QPointer<CalendarBox> _restrictUntilBox;
+	QPointer<Ui::CalendarBox> _restrictUntilBox;
 
 	static constexpr auto kUntilOneDay = -1;
 	static constexpr auto kUntilOneWeek = -2;

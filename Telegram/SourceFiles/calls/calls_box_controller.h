@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "boxes/peer_list_box.h"
+#include "ui/layers/generic_box.h"
 
 namespace Window {
 class SessionController;
@@ -15,10 +16,7 @@ class SessionController;
 
 namespace Calls {
 
-class BoxController
-	: public PeerListController
-	, private base::Subscriber
-	, private MTP::Sender {
+class BoxController : public PeerListController, private base::Subscriber {
 public:
 	explicit BoxController(not_null<Window::SessionController*> window);
 
@@ -27,6 +25,10 @@ public:
 	void rowClicked(not_null<PeerListRow*> row) override;
 	void rowActionClicked(not_null<PeerListRow*> row) override;
 	void loadMoreRows() override;
+
+	base::unique_qptr<Ui::PopupMenu> rowContextMenu(
+		QWidget *parent,
+		not_null<PeerListRow*> row) override;
 
 private:
 	void receivedCalls(const QVector<MTPMessage> &result);
@@ -44,11 +46,16 @@ private:
 		not_null<HistoryItem*> item) const;
 
 	const not_null<Window::SessionController*> _window;
+	MTP::Sender _api;
 
 	MsgId _offsetId = 0;
-	mtpRequestId _loadRequestId = 0;
+	int _loadRequestId = 0; // Not a real mtpRequestId.
 	bool _allLoaded = false;
 
 };
+
+void ClearCallsBox(
+	not_null<Ui::GenericBox*> box,
+	not_null<Window::SessionController*> window);
 
 } // namespace Calls

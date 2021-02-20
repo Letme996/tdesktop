@@ -12,7 +12,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/profile/info_profile_values.h"
 #include "info/profile/info_profile_icon.h"
 #include "info/profile/info_profile_values.h"
-#include "info/profile/info_profile_button.h"
 #include "info/profile/info_profile_members_controllers.h"
 #include "info/members/info_members_widget.h"
 #include "info/info_content_widget.h"
@@ -124,7 +123,7 @@ void Members::setupHeader() {
 		st::infoMembersHeader);
 	auto parent = _header.data();
 
-	_openMembers = Ui::CreateChild<Button>(
+	_openMembers = Ui::CreateChild<Ui::SettingsButton>(
 		parent,
 		rpl::single(QString()));
 
@@ -213,10 +212,10 @@ void Members::setupButtons() {
 
 void Members::setupList() {
 	auto topSkip = _header ? _header->height() : 0;
+	_listController->setStyleOverrides(&st::infoMembersList);
 	_list = object_ptr<ListWidget>(
 		this,
-		_listController.get(),
-		st::infoMembersList);
+		_listController.get());
 	_list->scrollToRequests(
 	) | rpl::start_with_next([this](Ui::ScrollToRequest request) {
 		auto addmin = (request.ymin < 0 || !_header)
@@ -343,14 +342,14 @@ void Members::showMembersWithSearch(bool withSearch) {
 	//if (!_searchShown) {
 	//	toggleSearch();
 	//}
-	auto contentMemento = std::make_unique<Info::Members::Memento>(
+	auto contentMemento = std::make_shared<Info::Members::Memento>(
 		_controller);
 	contentMemento->setState(saveState());
 	contentMemento->setSearchStartsFocused(withSearch);
-	auto mementoStack = std::vector<std::unique_ptr<ContentMemento>>();
+	auto mementoStack = std::vector<std::shared_ptr<ContentMemento>>();
 	mementoStack.push_back(std::move(contentMemento));
 	_controller->showSection(
-		Info::Memento(std::move(mementoStack)));
+		std::make_shared<Info::Memento>(std::move(mementoStack)));
 }
 
 //void Members::toggleSearch(anim::type animated) {
@@ -416,7 +415,7 @@ void Members::peerListSetTitle(rpl::producer<QString> title) {
 void Members::peerListSetAdditionalTitle(rpl::producer<QString> title) {
 }
 
-bool Members::peerListIsRowSelected(not_null<PeerData*> peer) {
+bool Members::peerListIsRowChecked(not_null<PeerListRow*> row) {
 	return false;
 }
 
@@ -424,15 +423,15 @@ int Members::peerListSelectedRowsCount() {
 	return 0;
 }
 
-std::vector<not_null<PeerData*>> Members::peerListCollectSelectedRows() {
-	return {};
-}
-
 void Members::peerListScrollToTop() {
 	_scrollToRequests.fire({ -1, -1 });
 }
 
-void Members::peerListAddSelectedRowInBunch(not_null<PeerData*> peer) {
+void Members::peerListAddSelectedPeerInBunch(not_null<PeerData*> peer) {
+	Unexpected("Item selection in Info::Profile::Members.");
+}
+
+void Members::peerListAddSelectedRowInBunch(not_null<PeerListRow*> row) {
 	Unexpected("Item selection in Info::Profile::Members.");
 }
 

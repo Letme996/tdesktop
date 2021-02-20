@@ -23,13 +23,6 @@ class MainWindow : public Window::MainWindow {
 public:
 	explicit MainWindow(not_null<Window::Controller*> controller);
 
-	void psFirstShow();
-	void psInitSysMenu();
-	void psUpdateMargins();
-
-	void psRefreshTaskbarIcon() {
-	}
-
 	bool psFilterNativeEvent(void *event);
 
 	virtual QImage iconWithCounter(int size, int count, style::color bg, style::color fg, bool smallIcon) = 0;
@@ -42,11 +35,11 @@ public:
 
 	void updateWindowIcon() override;
 
+	void psShowTrayMenu();
+
 	class Private;
 
 public slots:
-	void psShowTrayMenu();
-
 	void psMacUndo();
 	void psMacRedo();
 	void psMacCut();
@@ -54,6 +47,7 @@ public slots:
 	void psMacPaste();
 	void psMacDelete();
 	void psMacSelectAll();
+	void psMacEmojiAndSymbols();
 
 	void psMacBold();
 	void psMacItalic();
@@ -71,7 +65,6 @@ protected:
 	void titleVisibilityChangedHook() override;
 	void unreadCounterChangedHook() override;
 
-	QImage psTrayIcon(bool selected = false) const;
 	bool hasTrayIcon() const override {
 		return trayIcon;
 	}
@@ -83,24 +76,23 @@ protected:
 	QSystemTrayIcon *trayIcon = nullptr;
 	QMenu *trayIconMenu = nullptr;
 
-	QImage trayImg, trayImgSel;
-
 	void psTrayMenuUpdated();
 	void psSetupTrayIcon();
 	virtual void placeSmallCounter(QImage &img, int size, int count, style::color bg, const QPoint &shift, style::color color) = 0;
 
 	QTimer psUpdatedPositionTimer;
 
+	void initShadows() override;
 	void closeWithoutDestroy() override;
+	void createGlobalMenu() override;
 
 private:
 	friend class Private;
 
-	void initTouchBar();
 	void hideAndDeactivate();
-	void createGlobalMenu();
 	void updateTitleCounter();
 	void updateIconCounters();
+	[[nodiscard]] QIcon generateIconForTray(int counter, bool muted) const;
 
 	std::unique_ptr<Private> _private;
 
@@ -108,6 +100,8 @@ private:
 	mutable QTimer psIdleTimer;
 
 	base::Timer _hideAfterFullScreenTimer;
+
+	rpl::variable<bool> _canApplyMarkdown;
 
 	QMenuBar psMainMenu;
 	QAction *psLogout = nullptr;

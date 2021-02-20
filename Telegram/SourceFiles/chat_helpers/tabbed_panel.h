@@ -75,9 +75,6 @@ private:
 
 	void hideByTimerOrLeave();
 	void moveByBottom();
-	bool isDestroying() const {
-		return !_selector;
-	}
 	void showFromSelector();
 
 	style::margins innerPadding() const;
@@ -112,6 +109,8 @@ private:
 
 	std::unique_ptr<Ui::PanelAnimation> _showAnimation;
 	Ui::Animations::Simple _a_show;
+
+	bool _shouldFinishHide = false;
 
 	bool _hiding = false;
 	bool _hideAfterSlide = false;

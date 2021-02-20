@@ -9,14 +9,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #include <array>
 
-namespace Images {
-class Source;
-} // namespace Images
-
 namespace Data {
 namespace AutoDownload {
 
-constexpr auto kMaxBytesLimit = 3000 * 512 * 1024;
+constexpr auto kMaxBytesLimit = 4000 * 512 * 1024;
 
 enum class Source {
 	User    = 0x00,
@@ -27,13 +23,24 @@ enum class Source {
 constexpr auto kSourcesCount = 3;
 
 enum class Type {
-	Photo        = 0x00,
-	Video        = 0x01,
-	VoiceMessage = 0x02,
-	VideoMessage = 0x03,
-	Music        = 0x04,
-	GIF          = 0x05,
-	File         = 0x06,
+	Photo                = 0x00,
+	AutoPlayVideo        = 0x01,
+	VoiceMessage         = 0x02,
+	AutoPlayVideoMessage = 0x03,
+	Music                = 0x04,
+	AutoPlayGIF          = 0x05,
+	File                 = 0x06,
+};
+
+inline constexpr auto kAutoPlayTypes = {
+	Type::AutoPlayVideo,
+	Type::AutoPlayVideoMessage,
+	Type::AutoPlayGIF,
+};
+
+inline constexpr auto kStreamedTypes = {
+	Type::VoiceMessage,
+	Type::Music,
 };
 
 constexpr auto kTypesCount = 7;
@@ -77,34 +84,48 @@ class Full {
 public:
 	void setBytesLimit(Source source, Type type, int bytesLimit);
 
-	bool shouldDownload(Source source, Type type, int fileSize) const;
-	int bytesLimit(Source source, Type type) const;
+	[[nodiscard]] bool shouldDownload(
+		Source source,
+		Type type,
+		int fileSize) const;
+	[[nodiscard]] int bytesLimit(Source source, Type type) const;
 
-	QByteArray serialize() const;
+	[[nodiscard]] QByteArray serialize() const;
 	bool setFromSerialized(const QByteArray &serialized);
 
-	static Full FullDisabled();
+	[[nodiscard]] static Full FullDisabled();
 
 private:
-	const Set &set(Source source) const;
-	Set &set(Source source);
-	const Set &setOrDefault(Source source, Type type) const;
+	[[nodiscard]] const Set &set(Source source) const;
+	[[nodiscard]] Set &set(Source source);
+	[[nodiscard]] const Set &setOrDefault(Source source, Type type) const;
 
 	std::array<Set, kSourcesCount> _data;
 
 };
 
-bool Should(
+[[nodiscard]] bool Should(
 	const Full &data,
 	not_null<PeerData*> peer,
 	not_null<DocumentData*> document);
-bool Should(
+[[nodiscard]] bool Should(
 	const Full &data,
 	not_null<DocumentData*> document);
-bool Should(
+[[nodiscard]] bool Should(
 	const Full &data,
 	not_null<PeerData*> peer,
-	not_null<Images::Source*> image);
+	not_null<PhotoData*> photo);
+
+[[nodiscard]] bool ShouldAutoPlay(
+	const Full &data,
+	not_null<PeerData*> peer,
+	not_null<DocumentData*> document);
+[[nodiscard]] bool ShouldAutoPlay(
+	const Full &data,
+	not_null<PeerData*> peer,
+	not_null<PhotoData*> photo);
+
+[[nodiscard]] Full WithDisabledAutoPlay(const Full &data);
 
 } // namespace AutoDownload
 } // namespace Data

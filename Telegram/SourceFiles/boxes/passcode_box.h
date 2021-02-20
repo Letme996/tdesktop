@@ -25,7 +25,7 @@ namespace Core {
 struct CloudPasswordState;
 } // namespace Core
 
-class PasscodeBox : public BoxContent, private MTP::Sender {
+class PasscodeBox : public Ui::BoxContent {
 public:
 	PasscodeBox(QWidget*, not_null<Main::Session*> session, bool turningOff);
 
@@ -130,10 +130,11 @@ private:
 	void serverError();
 
 	const not_null<Main::Session*> _session;
+	MTP::Sender _api;
 
 	QString _pattern;
 
-	QPointer<BoxContent> _replacedBy;
+	QPointer<Ui::BoxContent> _replacedBy;
 	bool _turningOff = false;
 	bool _cloudPwd = false;
 	CloudFields _cloudFields;
@@ -163,9 +164,13 @@ private:
 
 };
 
-class RecoverBox : public BoxContent, public RPCSender {
+class RecoverBox final : public Ui::BoxContent {
 public:
-	RecoverBox(QWidget*, const QString &pattern, bool notEmptyPassport);
+	RecoverBox(
+		QWidget*,
+		not_null<Main::Session*> session,
+		const QString &pattern,
+		bool notEmptyPassport);
 
 	rpl::producer<> passwordCleared() const;
 	rpl::producer<> recoveryExpired() const;
@@ -183,9 +188,10 @@ protected:
 private:
 	void submit();
 	void codeChanged();
-	void codeSubmitDone(bool recover, const MTPauth_Authorization &result);
-	bool codeSubmitFail(const RPCError &error);
+	void codeSubmitDone(const MTPauth_Authorization &result);
+	void codeSubmitFail(const RPCError &error);
 
+	MTP::Sender _api;
 	mtpRequestId _submitRequest = 0;
 
 	QString _pattern;
@@ -201,8 +207,15 @@ private:
 };
 
 struct RecoveryEmailValidation {
-	object_ptr<BoxContent> box;
+	object_ptr<Ui::BoxContent> box;
 	rpl::producer<> reloadRequests;
 	rpl::producer<> cancelRequests;
 };
-RecoveryEmailValidation ConfirmRecoveryEmail(const QString &pattern);
+[[nodiscard]] RecoveryEmailValidation ConfirmRecoveryEmail(
+	not_null<Main::Session*> session,
+	const QString &pattern);
+
+[[nodiscard]] object_ptr<Ui::GenericBox> PrePasswordErrorBox(
+	const RPCError &error,
+	not_null<Main::Session*> session,
+	TextWithEntities &&about);

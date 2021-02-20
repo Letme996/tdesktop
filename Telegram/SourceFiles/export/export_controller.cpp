@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "export/output/export_output_abstract.h"
 #include "export/output/export_output_result.h"
 #include "export/output/export_output_stats.h"
+#include "mtproto/mtp_instance.h"
 
 namespace Export {
 namespace {
@@ -24,7 +25,6 @@ Settings NormalizeSettings(const Settings &settings) {
 		return base::duplicate(settings);
 	}
 	auto result = base::duplicate(settings);
-	result.format = Output::Format::Html;
 	result.types = result.fullChats = Settings::Type::AnyChatsMask;
 	return result;
 }
@@ -35,6 +35,7 @@ class ControllerObject {
 public:
 	ControllerObject(
 		crl::weak_on_queue<ControllerObject> weak,
+		QPointer<MTP::Instance> mtproto,
 		const MTPInputPeer &peer);
 
 	rpl::producer<State> state() const;
@@ -132,8 +133,9 @@ private:
 
 ControllerObject::ControllerObject(
 	crl::weak_on_queue<ControllerObject> weak,
+	QPointer<MTP::Instance> mtproto,
 	const MTPInputPeer &peer)
-: _api(weak.runner())
+: _api(mtproto, weak.runner())
 , _state(PasswordCheckState{}) {
 	_api.errors(
 	) | rpl::start_with_next([=](RPCError &&error) {
@@ -159,13 +161,13 @@ rpl::producer<State> ControllerObject::state() const {
 	) | rpl::then(
 		_stateChanges.events()
 	) | rpl::filter([](const State &state) {
-		const auto password = base::get_if<PasswordCheckState>(&state);
+		const auto password = std::get_if<PasswordCheckState>(&state);
 		return !password || !password->requesting;
 	});
 }
 
 void ControllerObject::setState(State &&state) {
-	if (_state.is<CancelledState>()) {
+	if (v::is<CancelledState>(_state)) {
 		return;
 	}
 	_state = std::move(state);
@@ -352,7 +354,9 @@ void ControllerObject::initialized(const ApiWrap::StartInfo &info) {
 void ControllerObject::collectDialogsList() {
 	setState(stateDialogsList(0));
 	_api.requestDialogsList([=](int count) {
-		setState(stateDialogsList(count));
+		if (count > 0) {
+			setState(stateDialogsList(count - 1));
+		}
 		return true;
 	}, [=](Data::DialogsInfo &&result) {
 		_dialogsInfo = std::move(result);
@@ -560,6 +564,8 @@ void ControllerObject::fillMessagesState(
 	result.entityName = dialog->name;
 	result.entityType = (dialog->type == Data::DialogInfo::Type::Self)
 		? ProcessingState::EntityType::SavedMessages
+		: (dialog->type == Data::DialogInfo::Type::Replies)
+		? ProcessingState::EntityType::RepliesMessages
 		: ProcessingState::EntityType::Chat;
 	result.itemIndex = _messagesWritten + progress.itemIndex;
 	result.itemCount = std::max(_messagesCount, result.itemIndex);
@@ -585,7 +591,10 @@ void ControllerObject::setFinishedState() {
 		_stats.bytesCount() });
 }
 
-Controller::Controller(const MTPInputPeer &peer) : _wrapped(peer) {
+Controller::Controller(
+	QPointer<MTP::Instance> mtproto,
+	const MTPInputPeer &peer)
+: _wrapped(std::move(mtproto), peer) {
 }
 
 rpl::producer<State> Controller::state() const {

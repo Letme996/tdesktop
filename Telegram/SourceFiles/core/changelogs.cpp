@@ -7,8 +7,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "core/changelogs.h"
 
-#include "storage/localstorage.h"
 #include "lang/lang_keys.h"
+#include "core/application.h"
+#include "main/main_domain.h"
+#include "main/main_session.h"
+#include "storage/storage_domain.h"
 #include "data/data_session.h"
 #include "mainwindow.h"
 #include "apiwrap.h"
@@ -19,63 +22,100 @@ namespace {
 std::map<int, const char*> BetaLogs() {
 	return {
 	{
-		1006004,
-		"- Replace media when editing messages with media content.\n"
+		2004006,
+		"- Fix image compression option when sending files with drag-n-drop.\n"
 
-		"- Jump quickly to the top of your chats list.\n"
+		"- Fix caption text selection in media albums.\n"
 
-		"- Get emoji suggestions for the first word you type in a message.\n"
+		"- Fix drafts display in personal chats in the chats list.\n"
 
-		"- Help Telegram improve emoji suggestions in your language "
-		"using this interface https://translations.telegram.org/en/emoji"
+		"- Bug fixes and other minor improvements.\n"
 	},
 	{
-		1007001,
-		"- Disable pinned messages notifications in Settings."
+		2004008,
+		"- Upgrade several third party libraries to latest versions.\n"
 	},
 	{
-		1007004,
-		"- Download video files while watching them using streaming."
+		2004010,
+		"- Use inline bots and sticker by emoji suggestions in channel comments.\n"
+
+		"- Lock voice message recording, listen to your voice message before sending.\n"
 	},
 	{
-		1007008,
-		"\xE2\x80\xA2 Hide archived chats in the main menu.\n"
+		2004011,
+		"- Improve locked voice message recording.\n"
 
-		"\xE2\x80\xA2 See who is online straight from the chat list.\n"
+		"- Fix main window closing to tray on Windows.\n"
 
-		"\xE2\x80\xA2 Apply formatting to selected text parts "
-		"from the MacBook Pro TouchBar."
+		"- Fix crash in bot command sending.\n"
+
+		"- Fix adding additional photos when sending an album to a group with enabled slow mode.\n"
 	},
 	{
-		1007011,
-		"\xE2\x80\xA2 Use strikethrough and underline formatting.\n"
-
-		"\xE2\x80\xA2 Bug fixes and other minor improvements."
+		2004012,
+		"- Voice chats in groups. (alpha version)\n"
 	},
 	{
-		1008005,
-		"\xE2\x80\xA2 Create new themes based on your color and wallpaper choices.\n"
+		2004014,
+		"- Create voice chats in legacy groups.\n"
 
-		"\xE2\x80\xA2 Share your themes with other users via links.\n"
+		"- Fix sticker pack opening.\n"
 
-		"\xE2\x80\xA2 Update your theme for all its users when you change something.\n"
+		"- Fix group status display.\n"
+
+		"- Fix group members display.\n"
 	},
+	{
+		2004015,
+		"- Improve design of voice chats.\n"
+
+		"- Fix sending of voice messages as replies.\n"
+
+		"- Fix 'Open With' menu position in macOS.\n"
+
+		"- Fix freeze on secondary screen disconnect.\n"
+	},
+	{
+		2005002,
+		"- Fix possible crash in video calls.\n"
+
+		"- Fix possible crash in connecting to voice chats.\n"
+
+		"- Use different audio module code on Windows in calls.\n"
+	},
+	{
+		2005003,
+		"- Allow using mouse buttons in Push-to-Talk shortcut.\n"
+
+		"- Fix blurred thumbnails in Shared Links section.\n"
+	},
+	{
+		2005004,
+		"- Implement new audio module code for calls and voice chats.\n"
+
+		"- Allow retracting votes from polls in comments to channel posts.\n"
+
+		"- Show small voice chat button for empty voice chats.\n"
+
+		"- Fix media viewer updating when screen resolution is changed.\n"
+	},
+	{
+		2005005,
+		"- Fix recording of audio in voice chats.\n"
+
+		"- Fix media viewer zoom and crashing.\n"
+	},
+	{
+		2005006,
+		"- Press Up arrow to edit your last sent comment.\n"
+
+		"- Add more information to date tooltips "
+		"in Recent Actions and channel comments.\n"
+
+		"- Bug and crash fixes.\n"
+	}
 	};
 };
-
-QString FormatVersionDisplay(int version) {
-	return QString::number(version / 1000000)
-		+ '.' + QString::number((version % 1000000) / 1000)
-		+ ((version % 1000)
-			? ('.' + QString::number(version % 1000))
-			: QString());
-}
-
-QString FormatVersionPrecise(int version) {
-	return QString::number(version / 1000000)
-		+ '.' + QString::number((version % 1000000) / 1000)
-		+ '.' + QString::number(version % 1000);
-}
 
 } // namespace
 
@@ -92,7 +132,9 @@ Changelogs::Changelogs(not_null<Main::Session*> session, int oldVersion)
 
 std::unique_ptr<Changelogs> Changelogs::Create(
 		not_null<Main::Session*> session) {
-	const auto oldVersion = Local::oldMapVersion();
+	auto &local = Core::App().domain().local();
+	const auto oldVersion = local.oldVersion();
+	local.clearOldVersion();
 	return (oldVersion > 0 && oldVersion < AppVersion)
 		? std::make_unique<Changelogs>(session, oldVersion)
 		: nullptr;
@@ -143,7 +185,7 @@ void Changelogs::addLocalLogs() {
 			lt_changes,
 			tr::lng_new_version_minor(tr::now),
 			lt_link,
-			qsl("https://desktop.telegram.org/changelog"));
+			Core::App().changelogLink());
 		addLocalLog(text.trimmed());
 	}
 }
@@ -165,10 +207,32 @@ void Changelogs::addBetaLog(int changeVersion, const char *changes) {
 	if (_oldVersion >= changeVersion) {
 		return;
 	}
+	const auto text = [&] {
+		static const auto simple = u"\n- "_q;
+		static const auto separator = QString::fromUtf8("\n\xE2\x80\xA2 ");
+		auto result = QString::fromUtf8(changes).trimmed();
+		if (result.startsWith(simple.midRef(1))) {
+			result = separator.mid(1) + result.mid(simple.size() - 1);
+		}
+		return result.replace(simple, separator);
+	}();
 	const auto version = FormatVersionDisplay(changeVersion);
-	const auto text = qsl("New in version %1:\n\n").arg(version)
-		+ QString::fromUtf8(changes).trimmed();
-	addLocalLog(text);
+	const auto log = qsl("New in version %1:\n\n").arg(version) + text;
+	addLocalLog(log);
+}
+
+QString FormatVersionDisplay(int version) {
+	return QString::number(version / 1000000)
+		+ '.' + QString::number((version % 1000000) / 1000)
+		+ ((version % 1000)
+			? ('.' + QString::number(version % 1000))
+			: QString());
+}
+
+QString FormatVersionPrecise(int version) {
+	return QString::number(version / 1000000)
+		+ '.' + QString::number((version % 1000000) / 1000)
+		+ '.' + QString::number(version % 1000);
 }
 
 } // namespace Core

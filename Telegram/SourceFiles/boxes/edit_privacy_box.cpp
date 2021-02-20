@@ -14,7 +14,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/wrap/vertical_layout.h"
 #include "history/history.h"
 #include "boxes/peer_list_controllers.h"
-#include "info/profile/info_profile_button.h"
 #include "settings/settings_common.h"
 #include "settings/settings_privacy_security.h"
 #include "calls/calls_instance.h"
@@ -27,59 +26,57 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_channel.h"
 #include "window/window_session_controller.h"
 #include "styles/style_settings.h"
-#include "styles/style_boxes.h"
+#include "styles/style_layers.h"
 
 namespace {
 
 class PrivacyExceptionsBoxController : public ChatsListBoxController {
 public:
 	PrivacyExceptionsBoxController(
-		not_null<Window::SessionNavigation*> navigation,
+		not_null<Main::Session*> session,
 		rpl::producer<QString> title,
 		const std::vector<not_null<PeerData*>> &selected);
 
 	Main::Session &session() const override;
 	void rowClicked(not_null<PeerListRow*> row) override;
 
-	std::vector<not_null<PeerData*>> getResult() const;
-
 protected:
 	void prepareViewHook() override;
 	std::unique_ptr<Row> createRow(not_null<History*> history) override;
 
 private:
-	not_null<Window::SessionNavigation*> _navigation;
+	const not_null<Main::Session*> _session;
 	rpl::producer<QString> _title;
 	std::vector<not_null<PeerData*>> _selected;
 
 };
 
 PrivacyExceptionsBoxController::PrivacyExceptionsBoxController(
-	not_null<Window::SessionNavigation*> navigation,
+	not_null<Main::Session*> session,
 	rpl::producer<QString> title,
 	const std::vector<not_null<PeerData*>> &selected)
-: ChatsListBoxController(navigation)
-, _navigation(navigation)
+: ChatsListBoxController(session)
+, _session(session)
 , _title(std::move(title))
 , _selected(selected) {
 }
 
 Main::Session &PrivacyExceptionsBoxController::session() const {
-	return _navigation->session();
+	return *_session;
 }
 
 void PrivacyExceptionsBoxController::prepareViewHook() {
 	delegate()->peerListSetTitle(std::move(_title));
-	delegate()->peerListAddSelectedRows(_selected);
-}
-
-std::vector<not_null<PeerData*>> PrivacyExceptionsBoxController::getResult() const {
-	return delegate()->peerListCollectSelectedRows();
+	delegate()->peerListAddSelectedPeers(_selected);
 }
 
 void PrivacyExceptionsBoxController::rowClicked(not_null<PeerListRow*> row) {
+	const auto peer = row->peer();
+
+	// This call may delete row, if it was a search result row.
 	delegate()->peerListSetRowChecked(row, !row->checked());
-	if (const auto channel = row->peer()->asChannel()) {
+
+	if (const auto channel = peer->asChannel()) {
 		if (!channel->membersCountKnown()) {
 			channel->updateFull();
 		}
@@ -87,7 +84,7 @@ void PrivacyExceptionsBoxController::rowClicked(not_null<PeerListRow*> row) {
 }
 
 std::unique_ptr<PrivacyExceptionsBoxController::Row> PrivacyExceptionsBoxController::createRow(not_null<History*> history) {
-	if (history->peer->isSelf()) {
+	if (history->peer->isSelf() || history->peer->isRepliesChat()) {
 		return nullptr;
 	} else if (!history->peer->isUser()
 		&& !history->peer->isChat()
@@ -143,13 +140,13 @@ void EditPrivacyBox::editExceptions(
 		Exception exception,
 		Fn<void()> done) {
 	auto controller = std::make_unique<PrivacyExceptionsBoxController>(
-		_window,
+		&_window->session(),
 		_controller->exceptionBoxTitle(exception),
 		exceptions(exception));
 	auto initBox = [=, controller = controller.get()](
 			not_null<PeerListBox*> box) {
 		box->addButton(tr::lng_settings_save(), crl::guard(this, [=] {
-			exceptions(exception) = controller->getResult();
+			exceptions(exception) = box->collectSelectedRows();
 			const auto type = [&] {
 				switch (exception) {
 				case Exception::Always: return Exception::Never;
@@ -170,7 +167,7 @@ void EditPrivacyBox::editExceptions(
 	};
 	Ui::show(
 		Box<PeerListBox>(std::move(controller), std::move(initBox)),
-		LayerOption::KeepOther);
+		Ui::LayerOption::KeepOther);
 }
 
 QVector<MTPInputPrivacyRule> EditPrivacyBox::collectResult() {

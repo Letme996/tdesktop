@@ -29,6 +29,7 @@ public:
 	static void paint(
 		Painter &p,
 		not_null<const Row*> row,
+		FilterId filterId,
 		int fullWidth,
 		bool active,
 		bool selected,
@@ -70,14 +71,14 @@ enum UnreadBadgeSize {
 struct UnreadBadgeStyle {
 	UnreadBadgeStyle();
 
-	style::align align;
-	bool active;
-	bool selected;
-	bool muted;
+	style::align align = style::al_right;
+	bool active = false;
+	bool selected = false;
+	bool muted = false;
 	int textTop = 0;
-	int size;
-	int padding;
-	UnreadBadgeSize sizeId;
+	int size = 0;
+	int padding = 0;
+	UnreadBadgeSize sizeId = UnreadBadgeInDialogs;
 	style::font font;
 };
 void paintUnreadCount(

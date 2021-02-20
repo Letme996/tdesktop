@@ -10,9 +10,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/application.h"
 #include "storage/serialize_common.h"
 #include "storage/localstorage.h"
-#include "platform/platform_info.h"
 #include "boxes/confirm_box.h"
 #include "lang/lang_file_parser.h"
+#include "base/platform/base_platform_info.h"
 #include "base/qthelp_regex.h"
 
 namespace Lang {
@@ -20,9 +20,9 @@ namespace {
 
 const auto kSerializeVersionTag = qsl("#new");
 constexpr auto kSerializeVersion = 1;
-constexpr auto kDefaultLanguage = str_const("en");
-constexpr auto kCloudLangPackName = str_const("tdesktop");
-constexpr auto kCustomLanguage = str_const("#custom");
+constexpr auto kDefaultLanguage = "en"_cs;
+constexpr auto kCloudLangPackName = "tdesktop"_cs;
+constexpr auto kCustomLanguage = "#custom"_cs;
 constexpr auto kLangValuesLimit = 20000;
 
 std::vector<QString> PrepareDefaultValues() {
@@ -213,7 +213,7 @@ void ParseKeyValue(
 } // namespace
 
 QString DefaultLanguageId() {
-	return str_const_toString(kDefaultLanguage);
+	return kDefaultLanguage.utf16();
 }
 
 QString LanguageIdOrDefault(const QString &id) {
@@ -221,11 +221,11 @@ QString LanguageIdOrDefault(const QString &id) {
 }
 
 QString CloudLangPackName() {
-	return str_const_toString(kCloudLangPackName);
+	return kCloudLangPackName.utf16();
 }
 
 QString CustomLanguageId() {
-	return str_const_toString(kCustomLanguage);
+	return kCustomLanguage.utf16();
 }
 
 Language DefaultLanguage() {
@@ -258,7 +258,7 @@ void Instance::switchToId(const Language &data) {
 			value = PrepareTestValue(value, _id[5]);
 		}
 		if (!_derived) {
-			_updated.notify();
+			_updated.fire({});
 		}
 	}
 	updatePluralRules();
@@ -278,7 +278,7 @@ void Instance::setBaseId(const QString &baseId, const QString &pluralId) {
 void Instance::switchToCustomFile(const QString &filePath) {
 	if (loadFromCustomFile(filePath)) {
 		Local::writeLangPack();
-		_updated.notify();
+		_updated.fire({});
 	}
 }
 
@@ -667,9 +667,9 @@ void Instance::applyDifferenceToMe(
 		});
 	}
 	if (!_derived) {
-		_updated.notify();
+		_updated.fire({});
 	} else {
-		_derived->_updated.notify();
+		_derived->_updated.fire({});
 	}
 }
 
@@ -742,24 +742,38 @@ void Instance::resetValue(const QByteArray &key) {
 	}
 }
 
-Instance &Current() {
+Instance &GetInstance() {
 	return Core::App().langpack();
+}
+
+QString Id() {
+	return GetInstance().id();
+}
+
+rpl::producer<> Updated() {
+	return GetInstance().updated();
+}
+
+QString GetNonDefaultValue(const QByteArray &key) {
+	return GetInstance().getNonDefaultValue(key);
 }
 
 namespace details {
 
 QString Current(ushort key) {
-	return Lang::Current().getValue(key);
+	return GetInstance().getValue(key);
 }
 
-rpl::producer<QString> Viewer(ushort key) {
+rpl::producer<QString> Value(ushort key) {
 	return rpl::single(
-		Lang::Current().getValue(key)
-	) | then(base::ObservableViewer(
-		Lang::Current().updated()
-	) | rpl::map([=] {
-		return Lang::Current().getValue(key);
-	}));
+		Current(key)
+	) | then(
+		Updated() | rpl::map([=] { return Current(key); })
+	);
+}
+
+bool IsNonDefaultPlural(ushort keyBase) {
+	return GetInstance().isNonDefaultPlural(keyBase);
 }
 
 } // namespace details

@@ -8,42 +8,57 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "platform/platform_main_window.h"
+#include "base/unique_qptr.h"
 
-#include <QtCore/QTimer>
+namespace Ui {
+class PopupMenu;
+} // namespace Ui
+
+#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+class QTemporaryFile;
+class DBusMenuExporter;
+class StatusNotifierItem;
+
+typedef void* gpointer;
+typedef char gchar;
+typedef struct _GVariant GVariant;
+typedef struct _GDBusProxy GDBusProxy;
+#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
 
 namespace Platform {
 
 class MainWindow : public Window::MainWindow {
-	Q_OBJECT
-
 public:
 	explicit MainWindow(not_null<Window::Controller*> controller);
 
-	void psFirstShow();
-	void psInitSysMenu();
-	void psUpdateMargins();
+	virtual QImage iconWithCounter(
+		int size,
+		int count,
+		style::color bg,
+		style::color fg,
+		bool smallIcon) = 0;
 
-	void psRefreshTaskbarIcon() {
+	void psShowTrayMenu();
+
+	bool trayAvailable() {
+		return _sniAvailable || QSystemTrayIcon::isSystemTrayAvailable();
 	}
 
-	virtual QImage iconWithCounter(int size, int count, style::color bg, style::color fg, bool smallIcon) = 0;
-
-	static void LibsLoaded();
+	bool isActiveForTrayMenu() override;
 
 	~MainWindow();
 
-public slots:
-	void psShowTrayMenu();
-
-	void psStatusIconCheck();
-	void psUpdateIndicator();
-
 protected:
+	void initHook() override;
 	void unreadCounterChangedHook() override;
+	void updateGlobalMenuHook() override;
+	void handleVisibleChangedHook(bool visible) override;
 
+	void initTrayMenuHook() override;
 	bool hasTrayIcon() const override;
 
 	void workmodeUpdated(DBIWorkMode mode) override;
+	void createGlobalMenu() override;
 
 	QSystemTrayIcon *trayIcon = nullptr;
 	QMenu *trayIconMenu = nullptr;
@@ -51,17 +66,85 @@ protected:
 	void psTrayMenuUpdated();
 	void psSetupTrayIcon();
 
-	virtual void placeSmallCounter(QImage &img, int size, int count, style::color bg, const QPoint &shift, style::color color) = 0;
+	virtual void placeSmallCounter(
+		QImage &img,
+		int size,
+		int count,
+		style::color bg,
+		const QPoint &shift,
+		style::color color) = 0;
 
 private:
+	bool _sniAvailable = false;
+	base::unique_qptr<Ui::PopupMenu> _trayIconMenuXEmbed;
+
 	void updateIconCounters();
-	void psCreateTrayIcon();
 
-	QTimer _psCheckStatusIconTimer;
-	int _psCheckStatusIconLeft = 100;
+#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
+	StatusNotifierItem *_sniTrayIcon = nullptr;
+	GDBusProxy *_sniDBusProxy = nullptr;
+	std::unique_ptr<QTemporaryFile> _trayIconFile;
 
-	QTimer _psUpdateIndicatorTimer;
-	crl::time _psLastIndicatorUpdate = 0;
+	bool _appMenuSupported = false;
+	DBusMenuExporter *_mainMenuExporter = nullptr;
+
+	QMenu *psMainMenu = nullptr;
+	QAction *psLogout = nullptr;
+	QAction *psUndo = nullptr;
+	QAction *psRedo = nullptr;
+	QAction *psCut = nullptr;
+	QAction *psCopy = nullptr;
+	QAction *psPaste = nullptr;
+	QAction *psDelete = nullptr;
+	QAction *psSelectAll = nullptr;
+	QAction *psContacts = nullptr;
+	QAction *psAddContact = nullptr;
+	QAction *psNewGroup = nullptr;
+	QAction *psNewChannel = nullptr;
+
+	QAction *psBold = nullptr;
+	QAction *psItalic = nullptr;
+	QAction *psUnderline = nullptr;
+	QAction *psStrikeOut = nullptr;
+	QAction *psMonospace = nullptr;
+	QAction *psClearFormat = nullptr;
+
+	void setSNITrayIcon(int counter, bool muted);
+	void attachToSNITrayIcon();
+	void handleSNIHostRegistered();
+
+	void handleSNIOwnerChanged(
+		const QString &service,
+		const QString &oldOwner,
+		const QString &newOwner);
+
+	void handleAppMenuOwnerChanged(
+		const QString &service,
+		const QString &oldOwner,
+		const QString &newOwner);
+
+	void psLinuxUndo();
+	void psLinuxRedo();
+	void psLinuxCut();
+	void psLinuxCopy();
+	void psLinuxPaste();
+	void psLinuxDelete();
+	void psLinuxSelectAll();
+
+	void psLinuxBold();
+	void psLinuxItalic();
+	void psLinuxUnderline();
+	void psLinuxStrikeOut();
+	void psLinuxMonospace();
+	void psLinuxClearFormat();
+
+	static void sniSignalEmitted(
+		GDBusProxy *proxy,
+		gchar *sender_name,
+		gchar *signal_name,
+		GVariant *parameters,
+		gpointer user_data);
+#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
 
 };
 

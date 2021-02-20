@@ -12,8 +12,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/timer.h"
 #include "ui/effects/animations.h"
 #include "ui/effects/round_checkbox.h"
+#include "mtproto/sender.h"
 
-enum class SendMenuType;
+namespace SendMenu {
+enum class Type;
+} // namespace SendMenu
 
 namespace Window {
 class SessionNavigation;
@@ -32,10 +35,6 @@ class Row;
 class IndexedList;
 } // namespace Dialogs
 
-namespace Notify {
-struct PeerUpdate;
-} // namespace Notify
-
 namespace Ui {
 class MultiSelect;
 class InputField;
@@ -52,7 +51,7 @@ void ShareGameScoreByHash(
 	not_null<Main::Session*> session,
 	const QString &hash);
 
-class ShareBox : public BoxContent, public RPCSender {
+class ShareBox final : public Ui::BoxContent {
 public:
 	using CopyCallback = Fn<void()>;
 	using SubmitCallback = Fn<void(
@@ -85,7 +84,7 @@ private:
 	void copyLink();
 	bool searchByUsername(bool useCache = false);
 
-	SendMenuType sendMenuType() const;
+	SendMenu::Type sendMenuType() const;
 
 	void scrollTo(Ui::ScrollToRequest request);
 	void needSearchByUsername();
@@ -100,12 +99,13 @@ private:
 	void addPeerToMultiSelect(PeerData *peer, bool skipAnimation = false);
 	void innerSelectedChanged(PeerData *peer, bool checked);
 
-	void peopleReceived(
+	void peopleDone(
 		const MTPcontacts_Found &result,
 		mtpRequestId requestId);
-	bool peopleFailed(const RPCError &error, mtpRequestId requestId);
+	void peopleFail(const RPCError &error, mtpRequestId requestId);
 
 	const not_null<Window::SessionNavigation*> _navigation;
+	MTP::Sender _api;
 
 	CopyCallback _copyCallback;
 	SubmitCallback _submitCallback;

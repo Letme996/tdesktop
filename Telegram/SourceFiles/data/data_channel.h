@@ -73,6 +73,7 @@ public:
 
 	enum LastParticipantsStatus {
 		LastParticipantsUpToDate       = 0x00,
+		LastParticipantsOnceReceived   = 0x01,
 		LastParticipantsCountOutdated  = 0x02,
 	};
 	mutable int lastParticipantsStatus = LastParticipantsUpToDate;
@@ -93,10 +94,12 @@ public:
 		| MTPDchannel::Flag::f_broadcast
 		| MTPDchannel::Flag::f_verified
 		| MTPDchannel::Flag::f_scam
+		| MTPDchannel::Flag::f_fake
 		| MTPDchannel::Flag::f_megagroup
 		| MTPDchannel::Flag::f_restricted
 		| MTPDchannel::Flag::f_signatures
 		| MTPDchannel::Flag::f_username
+		| MTPDchannel::Flag::f_call_not_empty
 		| MTPDchannel::Flag::f_slowmode_enabled;
 	using Flags = Data::Flags<
 		MTPDchannel::Flags,
@@ -126,6 +129,7 @@ public:
 	void setPhoto(PhotoId photoId, const MTPChatPhoto &photo);
 
 	void setName(const QString &name, const QString &username);
+	void setAccessHash(uint64 accessHash);
 
 	void setFlags(MTPDchannel::Flags which) {
 		_flags.set(which);
@@ -200,6 +204,9 @@ public:
 	[[nodiscard]] bool isScam() const {
 		return flags() & MTPDchannel::Flag::f_scam;
 	}
+	[[nodiscard]] bool isFake() const {
+		return flags() & MTPDchannel::Flag::f_fake;
+	}
 
 	static MTPChatBannedRights KickedRestrictedRights();
 	static constexpr auto kRestrictUntilForever = TimeId(INT_MAX);
@@ -219,20 +226,7 @@ public:
 	void markForbidden();
 
 	[[nodiscard]] bool isGroupAdmin(not_null<UserData*> user) const;
-
-	[[nodiscard]] bool lastParticipantsCountOutdated() const {
-		if (!mgInfo
-			|| !(mgInfo->lastParticipantsStatus
-				& MegagroupInfo::LastParticipantsCountOutdated)) {
-			return false;
-		}
-		if (mgInfo->lastParticipantsCount == membersCount()) {
-			mgInfo->lastParticipantsStatus
-				&= ~MegagroupInfo::LastParticipantsCountOutdated;
-			return false;
-		}
-		return true;
-	}
+	[[nodiscard]] bool lastParticipantsRequestNeeded() const;
 	[[nodiscard]] bool isMegagroup() const {
 		return flags() & MTPDchannel::Flag::f_megagroup;
 	}
@@ -315,7 +309,9 @@ public:
 	[[nodiscard]] bool canRestrictUser(not_null<UserData*> user) const;
 
 	void setInviteLink(const QString &newInviteLink);
-	[[nodiscard]] QString inviteLink() const;
+	[[nodiscard]] QString inviteLink() const {
+		return _inviteLink;
+	}
 	[[nodiscard]] bool canHaveInviteLink() const;
 
 	void setLocation(const MTPChannelLocation &data);
@@ -323,6 +319,7 @@ public:
 
 	void setLinkedChat(ChannelData *linked);
 	[[nodiscard]] ChannelData *linkedChat() const;
+	[[nodiscard]] bool linkedChatKnown() const;
 
 	void ptsInit(int32 pts) {
 		_ptsWaiter.init(pts);
@@ -368,8 +365,8 @@ public:
 		return _ptsWaiter.waitingForShortPoll();
 	}
 
-	[[nodiscard]] QString unavailableReason() const override;
-	void setUnavailableReason(const QString &reason);
+	void setUnavailableReasons(
+		std::vector<Data::UnavailableReason> &&reason);
 
 	[[nodiscard]] MsgId availableMinId() const {
 		return _availableMinId;
@@ -397,10 +394,23 @@ public:
 	[[nodiscard]] TimeId slowmodeLastMessage() const;
 	void growSlowmodeLastMessage(TimeId when);
 
+	void setInvitePeek(const QString &hash, TimeId expires);
+	void clearInvitePeek();
+	[[nodiscard]] TimeId invitePeekExpires() const;
+	[[nodiscard]] QString invitePeekHash() const;
+	void privateErrorReceived();
+
+	[[nodiscard]] Data::GroupCall *groupCall() const {
+		return _call.get();
+	}
+	void migrateCall(std::unique_ptr<Data::GroupCall> call);
+	void setGroupCall(const MTPInputGroupCall &call);
+	void clearGroupCall();
+
 	// Still public data members.
 	uint64 access = 0;
 
-	MTPinputChannel inputChannel;
+	MTPinputChannel inputChannel = MTP_inputChannelEmpty();
 
 	QString username;
 
@@ -412,6 +422,13 @@ public:
 	TimeId inviteDate = 0;
 
 private:
+	struct InvitePeek {
+		QString hash;
+		TimeId expires = 0;
+	};
+
+	auto unavailableReasons() const
+		-> const std::vector<Data::UnavailableReason> & override;
 	bool canEditLastAdmin(not_null<UserData*> user) const;
 
 	Flags _flags = Flags(MTPDchannel_ClientFlag::f_forbidden | 0);
@@ -431,9 +448,12 @@ private:
 	RestrictionFlags _restrictions;
 	TimeId _restrictedUntil;
 
-	QString _unavailableReason;
+	std::vector<Data::UnavailableReason> _unavailableReasons;
+	std::unique_ptr<InvitePeek> _invitePeek;
 	QString _inviteLink;
-	ChannelData *_linkedChat = nullptr;
+	std::optional<ChannelData*> _linkedChat;
+
+	std::unique_ptr<Data::GroupCall> _call;
 
 	int _slowmodeSeconds = 0;
 	TimeId _slowmodeLastMessage = 0;

@@ -27,15 +27,15 @@ public:
 		not_null<ChannelData*> channel,
 		base::flat_set<not_null<UserData*>> &&alreadyIn);
 
-	explicit AddParticipantsBoxController(
-		not_null<Window::SessionNavigation*> navigation);
+	explicit AddParticipantsBoxController(not_null<Main::Session*> session);
+	explicit AddParticipantsBoxController(not_null<PeerData*> peer);
 	AddParticipantsBoxController(
-		not_null<Window::SessionNavigation*> navigation,
-		not_null<PeerData*> peer);
-	AddParticipantsBoxController(
-		not_null<Window::SessionNavigation*> navigation,
 		not_null<PeerData*> peer,
 		base::flat_set<not_null<UserData*>> &&alreadyIn);
+
+	[[nodiscard]] not_null<PeerData*> peer() const {
+		return _peer;
+	}
 
 	void rowClicked(not_null<PeerListRow*> row) override;
 	void itemDeselectedHook(not_null<PeerData*> peer) override;
@@ -44,6 +44,7 @@ protected:
 	void prepareViewHook() override;
 	std::unique_ptr<PeerListRow> createRow(
 		not_null<UserData*> user) override;
+	virtual bool needsInviteLinkButton();
 
 private:
 	static void Start(
@@ -52,6 +53,7 @@ private:
 		base::flat_set<not_null<UserData*>> &&alreadyIn,
 		bool justCreated);
 
+	void addInviteLinkButton();
 	bool inviteSelectedUsers(not_null<PeerListBox*> box) const;
 	void subscribeToMigration();
 	int alreadyInCount() const;
@@ -69,7 +71,6 @@ private:
 class AddSpecialBoxController
 	: public PeerListController
 	, private base::Subscriber
-	, private MTP::Sender
 	, public base::has_weak_ptr {
 public:
 	using Role = ParticipantsBoxController::Role;
@@ -87,12 +88,15 @@ public:
 		AdminDoneCallback adminDoneCallback,
 		BannedDoneCallback bannedDoneCallback);
 
-	Main::Session &session() const override;
+	[[nodiscard]] not_null<PeerData*> peer() const {
+		return _peer;
+	}
+	[[nodiscard]] Main::Session &session() const override;
 	void prepare() override;
 	void rowClicked(not_null<PeerListRow*> row) override;
 	void loadMoreRows() override;
 
-	std::unique_ptr<PeerListRow> createSearchRow(
+	[[nodiscard]] std::unique_ptr<PeerListRow> createSearchRow(
 		not_null<PeerData*> peer) override;
 
 private:
@@ -117,17 +121,18 @@ private:
 	std::unique_ptr<PeerListRow> createRow(not_null<UserData*> user) const;
 
 	void subscribeToMigration();
-	void migrate(not_null<ChannelData*> channel);
+	void migrate(not_null<ChatData*> chat, not_null<ChannelData*> channel);
 
 	not_null<PeerData*> _peer;
+	MTP::Sender _api;
 	Role _role = Role::Admins;
 	int _offset = 0;
 	mtpRequestId _loadRequestId = 0;
 	bool _allLoaded = false;
 	ParticipantsAdditionalData _additional;
 	std::unique_ptr<ParticipantsOnlineSorter> _onlineSorter;
-	BoxPointer _editBox;
-	QPointer<BoxContent> _editParticipantBox;
+	Ui::BoxPointer _editBox;
+	QPointer<Ui::BoxContent> _editParticipantBox;
 	AdminDoneCallback _adminDoneCallback;
 	BannedDoneCallback _bannedDoneCallback;
 
@@ -139,7 +144,6 @@ protected:
 // Finds chat/channel members, then contacts, then global search results.
 class AddSpecialBoxSearchController
 	: public PeerListSearchController
-	, private MTP::Sender
 	, private base::Subscriber {
 public:
 	using Role = ParticipantsBoxController::Role;
@@ -181,6 +185,7 @@ private:
 
 	not_null<PeerData*> _peer;
 	not_null<ParticipantsAdditionalData*> _additional;
+	MTP::Sender _api;
 
 	base::Timer _timer;
 	QString _query;

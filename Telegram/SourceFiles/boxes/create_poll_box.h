@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/abstract_box.h"
 #include "api/api_common.h"
 #include "data/data_poll.h"
+#include "base/flags.h"
 
 struct PollData;
 
@@ -17,11 +18,15 @@ namespace Ui {
 class VerticalLayout;
 } // namespace Ui
 
-namespace Main {
-class Session;
-} // namespace Main
+namespace Window {
+class SessionController;
+} // namespace Window
 
-class CreatePollBox : public BoxContent {
+namespace SendMenu {
+enum class Type;
+} // namespace SendMenu
+
+class CreatePollBox : public Ui::BoxContent {
 public:
 	struct Result {
 		PollData poll;
@@ -30,10 +35,13 @@ public:
 
 	CreatePollBox(
 		QWidget*,
-		not_null<Main::Session*> session,
-		Api::SendType sendType);
+		not_null<Window::SessionController*> controller,
+		PollData::Flags chosen,
+		PollData::Flags disabled,
+		Api::SendType sendType,
+		SendMenu::Type sendMenuType);
 
-	rpl::producer<Result> submitRequests() const;
+	[[nodiscard]] rpl::producer<Result> submitRequests() const;
 	void submitFailed(const QString &error);
 
 	void setInnerFocus() override;
@@ -42,12 +50,28 @@ protected:
 	void prepare() override;
 
 private:
-	object_ptr<Ui::RpWidget> setupContent();
-	not_null<Ui::InputField*> setupQuestion(
-		not_null<Ui::VerticalLayout*> container);
+	enum class Error {
+		Question = 0x01,
+		Options  = 0x02,
+		Correct  = 0x04,
+		Other    = 0x08,
+		Solution = 0x10,
+	};
+	friend constexpr inline bool is_flag_type(Error) { return true; }
+	using Errors = base::flags<Error>;
 
-	const not_null<Main::Session*> _session;
+	[[nodiscard]] object_ptr<Ui::RpWidget> setupContent();
+	[[nodiscard]] not_null<Ui::InputField*> setupQuestion(
+		not_null<Ui::VerticalLayout*> container);
+	[[nodiscard]] not_null<Ui::InputField*> setupSolution(
+		not_null<Ui::VerticalLayout*> container,
+		rpl::producer<bool> shown);
+
+	const not_null<Window::SessionController*> _controller;
+	const PollData::Flags _chosen = PollData::Flags();
+	const PollData::Flags _disabled = PollData::Flags();
 	const Api::SendType _sendType = Api::SendType();
+	const SendMenu::Type _sendMenuType;
 	Fn<void()> _setInnerFocus;
 	Fn<rpl::producer<bool>()> _dataIsValidValue;
 	rpl::event_stream<Result> _submitRequests;

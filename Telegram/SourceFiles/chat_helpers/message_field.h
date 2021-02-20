@@ -11,6 +11,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/timer.h"
 #include "base/qt_connection.h"
 
+#ifndef TDESKTOP_DISABLE_SPELLCHECK
+#include "boxes/dictionaries_manager.h"
+#include "spellcheck/spelling_highlighter.h"
+#endif // TDESKTOP_DISABLE_SPELLCHECK
+
 #include <QtGui/QClipboard>
 
 namespace Main {
@@ -21,6 +26,10 @@ namespace Window {
 class SessionController;
 } // namespace Window
 
+namespace Ui {
+class PopupMenu;
+} // namespace Ui
+
 QString PrepareMentionTag(not_null<UserData*> user);
 TextWithTags PrepareEditText(not_null<HistoryItem*> item);
 
@@ -29,11 +38,16 @@ Fn<bool(
 	QString text,
 	QString link,
 	Ui::InputField::EditLinkAction action)> DefaultEditLinkCallback(
-		not_null<Main::Session*> session,
+		not_null<Window::SessionController*> controller,
 		not_null<Ui::InputField*> field);
 void InitMessageField(
 	not_null<Window::SessionController*> controller,
 	not_null<Ui::InputField*> field);
+
+void InitSpellchecker(
+	not_null<Window::SessionController*> controller,
+	not_null<Ui::InputField*> field);
+
 bool HasSendText(not_null<const Ui::InputField*> field);
 
 struct InlineBotQuery {
@@ -42,7 +56,9 @@ struct InlineBotQuery {
 	UserData *bot = nullptr;
 	bool lookingUpBot = false;
 };
-InlineBotQuery ParseInlineBotQuery(not_null<const Ui::InputField*> field);
+InlineBotQuery ParseInlineBotQuery(
+	not_null<Main::Session*> session,
+	not_null<const Ui::InputField*> field);
 
 struct AutocompleteQuery {
 	QString query;
@@ -55,7 +71,9 @@ class MessageLinksParser : private QObject {
 public:
 	MessageLinksParser(not_null<Ui::InputField*> field);
 
-	const rpl::variable<QStringList> &list() const;
+	void parseNow();
+
+	[[nodiscard]] const rpl::variable<QStringList> &list() const;
 
 protected:
 	bool eventFilter(QObject *object, QEvent *event) override;
@@ -85,16 +103,3 @@ private:
 	base::qt_connection _connection;
 
 };
-
-enum class SendMenuType {
-	Disabled,
-	SilentOnly,
-	Scheduled,
-	Reminder,
-};
-
-void SetupSendMenu(
-	not_null<Ui::RpWidget*> button,
-	Fn<SendMenuType()> type,
-	Fn<void()> silent,
-	Fn<void()> schedule);

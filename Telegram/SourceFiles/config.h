@@ -10,12 +10,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "core/version.h"
 #include "settings.h"
 
-constexpr str_const AppNameOld = "Telegram Win (Unofficial)";
-constexpr str_const AppName = "Telegram Desktop";
-
-constexpr str_const AppId = "{53F49750-6209-4FBF-9CA8-7A333C87D1ED}"; // used in updater.cpp and Setup.iss for Windows
-constexpr str_const AppFile = "Telegram";
-
 enum {
 	MaxSelectedItems = 100,
 
@@ -27,26 +21,13 @@ enum {
 	LocalEncryptSaltSize = 32, // 256 bit
 
 	AnimationTimerDelta = 7,
-	ClipThreadsCount = 8,
-	AverageGifSize = 320 * 240,
-	WaitBeforeGifPause = 200, // wait 200ms for gif draw before pausing it
 	RecentInlineBotsLimit = 10,
-
-	AVBlockSize = 4096, // 4Kb for ffmpeg blocksize
 
 	AutoSearchTimeout = 900, // 0.9 secs
 	SearchPerPage = 50,
 	SearchManyPerPage = 100,
 	LinksOverviewPerPage = 12,
 	MediaOverviewStartPerPage = 5,
-
-	AudioVoiceMsgMaxLength = 100 * 60, // 100 minutes
-	AudioVoiceMsgChannels = 2, // stereo
-
-	StickerMaxSize = 2048, // 2048x2048 is a max image size for sticker
-
-	MaxZoomLevel = 7, // x8
-	ZoomToScreenLevel = 1024, // just constant
 
 	PreloadHeightsCount = 3, // when 3 screens to scroll left make a preload request
 
@@ -75,56 +56,6 @@ inline const char *cGUIDStr() {
 	return gGuidStr;
 }
 
-struct BuiltInDc {
-	int id;
-	const char *ip;
-	int port;
-};
-
-static const BuiltInDc _builtInDcs[] = {
-	{ 1, "149.154.175.50", 443 },
-	{ 2, "149.154.167.51", 443 },
-	{ 3, "149.154.175.100", 443 },
-	{ 4, "149.154.167.91", 443 },
-	{ 5, "149.154.171.5", 443 }
-};
-
-static const BuiltInDc _builtInDcsIPv6[] = {
-	{ 1, "2001:0b28:f23d:f001:0000:0000:0000:000a", 443 },
-	{ 2, "2001:067c:04e8:f002:0000:0000:0000:000a", 443 },
-	{ 3, "2001:0b28:f23d:f003:0000:0000:0000:000a", 443 },
-	{ 4, "2001:067c:04e8:f004:0000:0000:0000:000a", 443 },
-	{ 5, "2001:0b28:f23f:f005:0000:0000:0000:000a", 443 }
-};
-
-static const BuiltInDc _builtInTestDcs[] = {
-	{ 1, "149.154.175.10", 443 },
-	{ 2, "149.154.167.40", 443 },
-	{ 3, "149.154.175.117", 443 }
-};
-
-static const BuiltInDc _builtInTestDcsIPv6[] = {
-	{ 1, "2001:0b28:f23d:f001:0000:0000:0000:000e", 443 },
-	{ 2, "2001:067c:04e8:f002:0000:0000:0000:000e", 443 },
-	{ 3, "2001:0b28:f23d:f003:0000:0000:0000:000e", 443 }
-};
-
-inline const BuiltInDc *builtInDcs() {
-	return cTestMode() ? _builtInTestDcs : _builtInDcs;
-}
-
-inline int builtInDcsCount() {
-	return (cTestMode() ? sizeof(_builtInTestDcs) : sizeof(_builtInDcs)) / sizeof(BuiltInDc);
-}
-
-inline const BuiltInDc *builtInDcsIPv6() {
-	return cTestMode() ? _builtInTestDcsIPv6 : _builtInDcsIPv6;
-}
-
-inline int builtInDcsCountIPv6() {
-	return (cTestMode() ? sizeof(_builtInTestDcsIPv6) : sizeof(_builtInDcsIPv6)) / sizeof(BuiltInDc);
-}
-
 static const char *UpdatesPublicKey = "\
 -----BEGIN RSA PUBLIC KEY-----\n\
 MIGJAoGBAMA4ViQrjkPZ9xj0lrer3r23JvxOnrtE8nI69XLGSr+sRERz9YnUptnU\n\
@@ -143,14 +74,8 @@ w/CVnbwQOw0g5GBwwFV3r0uTTvy44xx8XXxk+Qknu4eBCsmrAFNnAgMBAAE=\n\
 
 #if defined TDESKTOP_API_ID && defined TDESKTOP_API_HASH
 
-#define TDESKTOP_API_HASH_TO_STRING_HELPER(V) #V
-#define TDESKTOP_API_HASH_TO_STRING(V) TDESKTOP_API_HASH_TO_STRING_HELPER(V)
-
 constexpr auto ApiId = TDESKTOP_API_ID;
-constexpr auto ApiHash = TDESKTOP_API_HASH_TO_STRING(TDESKTOP_API_HASH);
-
-#undef TDESKTOP_API_HASH_TO_STRING
-#undef TDESKTOP_API_HASH_TO_STRING_HELPER
+constexpr auto ApiHash = MACRO_TO_STRING(TDESKTOP_API_HASH);
 
 #else // TDESKTOP_API_ID && TDESKTOP_API_HASH
 
@@ -183,7 +108,7 @@ constexpr auto ApiHash = "344583e45741c457fe1862106095a5eb";
 #if (TDESKTOP_ALPHA_VERSION != 0)
 
 // Private key for downloading closed alphas.
-#include "../../../TelegramPrivate/alpha_private.h"
+#include "../../../DesktopPrivate/alpha_private.h"
 
 #else
 static const char *AlphaPrivateKey = "";
@@ -196,34 +121,7 @@ inline const QString &cDataFile() {
 	return res;
 }
 
-inline const QString &cTempDir() {
-	static const QString res = cWorkingDir() + qsl("tdata/tdld/");
-	return res;
-}
-
 inline const QRegularExpression &cRussianLetters() {
 	static QRegularExpression regexp(QString::fromUtf8("[а-яА-ЯёЁ]"));
 	return regexp;
-}
-
-inline const QStringList &cImgExtensions() {
-	static QStringList result;
-	if (result.isEmpty()) {
-		result.reserve(4);
-		result.push_back(qsl(".jpg"));
-		result.push_back(qsl(".jpeg"));
-		result.push_back(qsl(".png"));
-		result.push_back(qsl(".gif"));
-	}
-	return result;
-}
-
-inline const QStringList &cExtensionsForCompress() {
-	static QStringList result;
-	if (result.isEmpty()) {
-		result.push_back(qsl(".jpg"));
-		result.push_back(qsl(".jpeg"));
-		result.push_back(qsl(".png"));
-	}
-	return result;
 }

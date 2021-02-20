@@ -5,7 +5,7 @@ the official desktop application for the Telegram messaging service.
 For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
-using "basic.style";
+using "ui/basic.style";
 
 using "ui/widgets/widgets.style";
 
@@ -36,8 +36,14 @@ dialogsPadding: point(10px, 8px);
 
 dialogsOnlineBadgeStroke: 2px;
 dialogsOnlineBadgeSize: 10px;
-dialogsOnlineBadgeSkip: point(10px, 12px);
+dialogsOnlineBadgeSkip: point(0px, 2px);
 dialogsOnlineBadgeDuration: 150;
+
+dialogsCallBadgeSize: 16px;
+dialogsCallBadgeSkip: point(-1px, 1px);
+
+dialogsSpeakingStrokeNumerator: 16px;
+dialogsSpeakingDenominator: 8.;
 
 dialogsImportantBarHeight: 37px;
 
@@ -87,13 +93,21 @@ dialogsTextPaletteArchiveActive: TextPalette(defaultTextPalette) {
 	linkFg: dialogsTextFgActive;
 }
 
+dialogsEmptyHeight: 160px;
+dialogsEmptySkip: 2px;
+dialogsEmptyLabel: FlatLabel(defaultFlatLabel) {
+	minWidth: 32px;
+	align: align(top);
+	textFg: windowSubTextFg;
+}
+
 dialogsMenuToggle: IconButton {
 	width: 40px;
 	height: 40px;
 
 	icon: icon {{ "dialogs_menu", dialogsMenuIconFg }};
 	iconOver: icon {{ "dialogs_menu", dialogsMenuIconFgOver }};
-	iconPosition: point(10px, 10px);
+	iconPosition: point(-1px, -1px);
 
 	rippleAreaPosition: point(0px, 0px);
 	rippleAreaSize: 40px;
@@ -101,6 +115,15 @@ dialogsMenuToggle: IconButton {
 		color: windowBgOver;
 	}
 }
+dialogsMenuToggleUnread: icon {
+	{ "dialogs_menu_unread", dialogsMenuIconFg },
+	{ "dialogs_menu_unread_dot", dialogsUnreadBg },
+};
+dialogsMenuToggleUnreadMuted: icon {
+	{ "dialogs_menu_unread", dialogsMenuIconFg },
+	{ "dialogs_menu_unread_dot", dialogsMenuIconFg },
+};
+
 dialogsLock: IconButton(dialogsMenuToggle) {
 	icon: icon {{ "dialogs_lock", dialogsMenuIconFg }};
 	iconOver: icon {{ "dialogs_lock", dialogsMenuIconFgOver }};
@@ -119,6 +142,11 @@ dialogsSearchFrom: IconButton(dialogsCalendar) {
 	width: 26px;
 	icon: icon {{ "dialogs_search_from", dialogsMenuIconFg }};
 	iconOver: icon {{ "dialogs_search_from", dialogsMenuIconFgOver }};
+}
+dialogsSearchForNarrowFilters: IconButton(dialogsMenuToggle) {
+	icon: icon {{ "top_bar_search", menuIconFg }};
+	iconOver: icon {{ "top_bar_search", menuIconFgOver }};
+	iconPosition: point(4px, 4px);
 }
 dialogsSearchFromPadding: margins(10px, 10px, 10px, 10px);
 
@@ -169,6 +197,7 @@ dialogsBotIconActive: icon {{ "dialogs_bot", dialogsChatIconFgActive, point(1px,
 //dialogsFeedIconOver: icon {{ "dialogs_feed", dialogsChatIconFgOver, point(4px, 4px) }};
 //dialogsFeedIconActive: icon {{ "dialogs_feed", dialogsChatIconFgActive, point(4px, 4px) }};
 dialogsArchiveUserpic: icon {{ "archive_userpic", historyPeerUserpicFg }};
+dialogsRepliesUserpic: icon {{ "replies_userpic", historyPeerUserpicFg }};
 
 dialogsSendStateSkip: 20px;
 dialogsSendingIcon: icon {{ "dialogs_sending", dialogsSendingIconFg, point(8px, 4px) }};

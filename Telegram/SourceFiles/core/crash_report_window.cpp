@@ -39,7 +39,7 @@ PreLaunchWindow::PreLaunchWindow(QString title) {
 	setWindowTitle(title.isEmpty() ? qsl("Telegram") : title);
 
 	QPalette p(palette());
-	p.setColor(QPalette::Background, QColor(255, 255, 255));
+	p.setColor(QPalette::Window, QColor(255, 255, 255));
 	setPalette(p);
 
 	QLabel tmp(this);
@@ -74,12 +74,12 @@ PreLaunchWindow::~PreLaunchWindow() {
 
 PreLaunchLabel::PreLaunchLabel(QWidget *parent) : QLabel(parent) {
 	QFont labelFont(font());
-	labelFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans Semibold")));
+	labelFont.setFamily(style::internal::GetFontOverride(style::internal::FontSemibold));
 	labelFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(labelFont);
 
 	QPalette p(palette());
-	p.setColor(QPalette::Foreground, QColor(0, 0, 0));
+	p.setColor(QPalette::WindowText, QColor(0, 0, 0));
 	setPalette(p);
 	show();
 };
@@ -92,12 +92,12 @@ void PreLaunchLabel::setText(const QString &text) {
 
 PreLaunchInput::PreLaunchInput(QWidget *parent, bool password) : QLineEdit(parent) {
 	QFont logFont(font());
-	logFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans")));
+	logFont.setFamily(style::internal::GetFontOverride());
 	logFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(logFont);
 
 	QPalette p(palette());
-	p.setColor(QPalette::Foreground, QColor(0, 0, 0));
+	p.setColor(QPalette::WindowText, QColor(0, 0, 0));
 	setPalette(p);
 
 	QLineEdit::setTextMargins(0, 0, 0, 0);
@@ -110,12 +110,12 @@ PreLaunchInput::PreLaunchInput(QWidget *parent, bool password) : QLineEdit(paren
 
 PreLaunchLog::PreLaunchLog(QWidget *parent) : QTextEdit(parent) {
 	QFont logFont(font());
-	logFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans")));
+	logFont.setFamily(style::internal::GetFontOverride());
 	logFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(logFont);
 
 	QPalette p(palette());
-	p.setColor(QPalette::Foreground, QColor(96, 96, 96));
+	p.setColor(QPalette::WindowText, QColor(96, 96, 96));
 	setPalette(p);
 
 	setReadOnly(true);
@@ -132,7 +132,7 @@ PreLaunchButton::PreLaunchButton(QWidget *parent, bool confirm) : QPushButton(pa
 	setObjectName(confirm ? "confirm" : "cancel");
 
 	QFont closeFont(font());
-	closeFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans Semibold")));
+	closeFont.setFamily(style::internal::GetFontOverride(style::internal::FontSemibold));
 	closeFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(closeFont);
 
@@ -151,7 +151,7 @@ PreLaunchCheckbox::PreLaunchCheckbox(QWidget *parent) : QCheckBox(parent) {
 	setCheckState(Qt::Checked);
 
 	QFont closeFont(font());
-	closeFont.setFamily(style::internal::GetFontOverride(qsl("Open Sans Semibold")));
+	closeFont.setFamily(style::internal::GetFontOverride(style::internal::FontSemibold));
 	closeFont.setPixelSize(static_cast<PreLaunchWindow*>(parent)->basicSize());
 	setFont(closeFont);
 
@@ -268,25 +268,25 @@ LastCrashedWindow::LastCrashedWindow(
 		}
 		if (_minidumpFull.isEmpty()) {
 			QString maxDump, maxDumpFull;
-            QDateTime maxDumpModified, workingModified = QFileInfo(cWorkingDir() + qsl("tdata/working")).lastModified();
+			QDateTime maxDumpModified, workingModified = QFileInfo(cWorkingDir() + qsl("tdata/working")).lastModified();
 			QFileInfoList list = QDir(dumpspath).entryInfoList();
-            for (int32 i = 0, l = list.size(); i < l; ++i) {
-                QString name = list.at(i).fileName();
-                if (name.endsWith(qstr(".dmp"))) {
-                    QDateTime modified = list.at(i).lastModified();
-                    if (maxDump.isEmpty() || qAbs(workingModified.secsTo(modified)) < qAbs(workingModified.secsTo(maxDumpModified))) {
-                        maxDump = name;
-                        maxDumpModified = modified;
-                        maxDumpFull = list.at(i).absoluteFilePath();
-                        dumpsize = list.at(i).size();
-                    }
-                }
-            }
-            if (!maxDump.isEmpty() && qAbs(workingModified.secsTo(maxDumpModified)) < 10) {
-                _minidumpName = maxDump;
-                _minidumpFull = maxDumpFull;
-            }
-        }
+			for (int32 i = 0, l = list.size(); i < l; ++i) {
+				QString name = list.at(i).fileName();
+				if (name.endsWith(qstr(".dmp"))) {
+					QDateTime modified = list.at(i).lastModified();
+					if (maxDump.isEmpty() || qAbs(workingModified.secsTo(modified)) < qAbs(workingModified.secsTo(maxDumpModified))) {
+						maxDump = name;
+						maxDumpModified = modified;
+						maxDumpFull = list.at(i).absoluteFilePath();
+						dumpsize = list.at(i).size();
+					}
+				}
+			}
+			if (!maxDump.isEmpty() && qAbs(workingModified.secsTo(maxDumpModified)) < 10) {
+				_minidumpName = maxDump;
+				_minidumpFull = maxDumpFull;
+			}
+		}
 		if (_minidumpName.isEmpty()) { // currently don't accept crash reports without dumps from google libraries
 			_sendingState = SendingNoReport;
 		} else {
@@ -783,7 +783,7 @@ void LastCrashedWindow::updateControls() {
 	}
 
 	QRect scr(QApplication::primaryScreen()->availableGeometry());
-	QSize s(2 * padding + QFontMetrics(_label.font()).width(qsl("Last time Telegram Desktop was not closed properly.")) + padding + _networkSettings.width(), h);
+	QSize s(2 * padding + QFontMetrics(_label.font()).horizontalAdvance(qsl("Last time Telegram Desktop was not closed properly.")) + padding + _networkSettings.width(), h);
 	if (s == size()) {
 		resizeEvent(0);
 	} else {
@@ -814,10 +814,10 @@ void LastCrashedWindow::onNetworkSettingsSaved(
 		QString password) {
 	Expects(host.isEmpty() || port != 0);
 
-	auto proxy = ProxyData();
+	auto proxy = MTP::ProxyData();
 	proxy.type = host.isEmpty()
-		? ProxyData::Type::None
-		: ProxyData::Type::Http;
+		? MTP::ProxyData::Type::None
+		: MTP::ProxyData::Type::Http;
 	proxy.host = host;
 	proxy.port = port;
 	proxy.user = username;
@@ -843,7 +843,7 @@ void LastCrashedWindow::proxyUpdated() {
 	activate();
 }
 
-rpl::producer<ProxyData> LastCrashedWindow::proxyChanges() const {
+rpl::producer<MTP::ProxyData> LastCrashedWindow::proxyChanges() const {
 	return _proxyChanges.events();
 }
 

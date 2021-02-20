@@ -8,9 +8,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "logs.h"
 
 #include "platform/platform_specific.h"
-#include "mtproto/connection.h"
 #include "core/crash_reports.h"
 #include "core/launcher.h"
+
+namespace {
+
+std::atomic<int> ThreadCounter/* = 0*/;
+
+} // namespace
 
 enum LogDataType {
 	LogDataMain,
@@ -45,11 +50,10 @@ QString _logsFilePath(LogDataType type, const QString &postfix = QString()) {
 
 int32 LogsStartIndexChosen = -1;
 QString _logsEntryStart() {
-	static int32 index = 0;
-	QDateTime tm(QDateTime::currentDateTime());
+	static thread_local auto threadId = ThreadCounter++;
+	static auto index = 0;
 
-	auto thread = qobject_cast<MTP::internal::Thread*>(QThread::currentThread());
-	auto threadId = thread ? thread->getThreadIndex() : 0;
+	const auto tm = QDateTime::currentDateTime();
 
 	return QString("[%1 %2-%3]").arg(tm.toString("hh:mm:ss.zzz")).arg(QString("%1").arg(threadId, 2, 10, QChar('0'))).arg(++index, 7, 10, QChar('0'));
 }
@@ -337,9 +341,10 @@ void start(not_null<Core::Launcher*> launcher) {
 
 	if (cAlphaVersion()) {
 		workingDirChosen = true;
-
-#if defined Q_OS_MAC || defined Q_OS_LINUX
 	} else {
+
+#ifdef Q_OS_UNIX
+
 		if (!cWorkingDir().isEmpty()) {
 			// This value must come from TelegramForcePortable
 			// or from the "-workdir" command line argument.
@@ -353,16 +358,17 @@ void start(not_null<Core::Launcher*> launcher) {
 		}
 		workingDirChosen = true;
 
-#if defined Q_OS_LINUX && !defined _DEBUG // fix first version
+#if !defined Q_OS_MAC && !defined _DEBUG // fix first version
 		moveOldDataFrom = initialWorkingDir;
-#endif // Q_OS_LINUX && !_DEBUG
+#endif // !Q_OS_MAC && !_DEBUG
 
-#elif defined Q_OS_WINRT // Q_OS_MAC || Q_OS_LINUX
-	} else {
+#elif defined Q_OS_WINRT // Q_OS_UNIX
+
 		cForceWorkingDir(psAppDataPath());
 		workingDirChosen = true;
 
-#elif defined OS_WIN_STORE // Q_OS_MAC || Q_OS_LINUX || Q_OS_WINRT
+#elif defined OS_WIN_STORE // Q_OS_UNIX || Q_OS_WINRT
+
 #ifdef _DEBUG
 		cForceWorkingDir(cExeDir());
 #else // _DEBUG
@@ -371,7 +377,7 @@ void start(not_null<Core::Launcher*> launcher) {
 		workingDirChosen = true;
 
 #elif defined Q_OS_WIN
-	} else {
+
 		if (!cWorkingDir().isEmpty()) {
 			// This value must come from TelegramForcePortable
 			// or from the "-workdir" command line argument.
@@ -379,7 +385,8 @@ void start(not_null<Core::Launcher*> launcher) {
 			workingDirChosen = true;
 		}
 
-#endif // Q_OS_MAC || Q_OS_LINUX || Q_OS_WINRT || OS_WIN_STORE
+#endif // Q_OS_UNIX || Q_OS_WINRT || OS_WIN_STORE
+
 	}
 
 	LogsData = new LogsDataFields();
@@ -407,16 +414,11 @@ void start(not_null<Core::Launcher*> launcher) {
 		LogsData = nullptr;
 	}
 
-	LOG(("Launched version: %1, "
-		"install beta: %2, "
-		"alpha: %3, "
-		"debug mode: %4, "
-		"test dc: %5"
+	LOG(("Launched version: %1, install beta: %2, alpha: %3, debug mode: %4"
 		).arg(AppVersion
 		).arg(Logs::b(cInstallBetaVersion())
 		).arg(cAlphaVersion()
-		).arg(Logs::b(DebugEnabled())
-		).arg(Logs::b(cTestMode())));
+		).arg(Logs::b(DebugEnabled())));
 	LOG(("Executable dir: %1, name: %2").arg(cExeDir()).arg(cExeName()));
 	LOG(("Initial working dir: %1").arg(initialWorkingDir));
 	LOG(("Working dir: %1").arg(cWorkingDir()));
@@ -554,7 +556,7 @@ void writeDebug(const char *file, int32 line, const QString &v) {
 	//OutputDebugString(reinterpret_cast<const wchar_t *>(msg.utf16()));
 #elif defined Q_OS_MAC
 	//objc_outputDebugString(msg);
-#elif defined Q_OS_LINUX && defined _DEBUG
+#elif defined Q_OS_UNIX && defined _DEBUG
 	//std::cout << msg.toUtf8().constData();
 #endif
 }

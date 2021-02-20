@@ -11,30 +11,36 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/rp_widget.h"
 #include "base/object_ptr.h"
 
-class BoxContent;
-
 namespace Ui {
 class VerticalLayout;
 class Checkbox;
 class ScrollArea;
+class BoxContent;
 } // namespace Ui
+
+namespace Main {
+class Session;
+} // namespace Main
 
 namespace Export {
 namespace View {
 
-constexpr auto kSizeValueCount = 80;
+constexpr auto kSizeValueCount = 90;
 int SizeLimitByIndex(int index);
 
 class SettingsWidget : public Ui::RpWidget {
 public:
-	SettingsWidget(QWidget *parent, Settings data);
+	SettingsWidget(
+		QWidget *parent,
+		not_null<Main::Session*> session,
+		Settings data);
 
 	rpl::producer<Settings> value() const;
 	rpl::producer<Settings> changes() const;
 	rpl::producer<> startClicks() const;
 	rpl::producer<> cancelClicks() const;
 
-	void setShowBoxCallback(Fn<void(object_ptr<BoxContent>)> callback) {
+	void setShowBoxCallback(Fn<void(object_ptr<Ui::BoxContent>)> callback) {
 		_showBoxCallback = std::move(callback);
 	}
 
@@ -66,7 +72,7 @@ private:
 		const QString &text,
 		Types types,
 		const QString &about);
- 	void addChatOption(
+	void addChatOption(
 		not_null<Ui::VerticalLayout*> container,
 		const QString &text,
 		Types types);
@@ -78,9 +84,12 @@ private:
 	void addSizeSlider(not_null<Ui::VerticalLayout*> container);
 	void addLocationLabel(
 		not_null<Ui::VerticalLayout*> container);
+	void addFormatAndLocationLabel(
+		not_null<Ui::VerticalLayout*> container);
 	void addLimitsLabel(
 		not_null<Ui::VerticalLayout*> container);
 	void chooseFolder();
+	void chooseFormat();
 	void refreshButtons(
 		not_null<Ui::RpWidget*> container,
 		bool canStart);
@@ -96,8 +105,9 @@ private:
 	template <typename Callback>
 	void changeData(Callback &&callback);
 
+	const not_null<Main::Session*> _session;
 	PeerId _singlePeerId = 0;
-	Fn<void(object_ptr<BoxContent>)> _showBoxCallback;
+	Fn<void(object_ptr<Ui::BoxContent>)> _showBoxCallback;
 
 	// Use through readData / changeData wrappers.
 	Settings _internal_data;

@@ -323,15 +323,15 @@ void RoundCheckbox::paint(Painter &p, int x, int y, int outerWidth, float64 mast
 	}
 }
 
-void RoundCheckbox::setChecked(bool newChecked, SetStyle speed) {
+void RoundCheckbox::setChecked(bool newChecked, anim::type animated) {
 	if (_checked == newChecked) {
-		if (speed != SetStyle::Animated) {
+		if (animated == anim::type::instant) {
 			_checkedProgress.stop();
 		}
 		return;
 	}
 	_checked = newChecked;
-	if (speed == SetStyle::Animated) {
+	if (animated == anim::type::normal) {
 		_checkedProgress.start(
 			_updateCallback,
 			_checked ? 0. : 1.,
@@ -423,7 +423,7 @@ void RoundImageCheckbox::paint(Painter &p, int x, int y, int outerWidth) {
 
 	if (selectionLevel > 0) {
 		PainterHighQualityEnabler hq(p);
-		p.setOpacity(snap(selectionLevel, 0., 1.));
+		p.setOpacity(std::clamp(selectionLevel, 0., 1.));
 		p.setBrush(Qt::NoBrush);
 		auto pen = _st.selectFg->p;
 		pen.setWidth(_st.selectWidth);
@@ -438,19 +438,19 @@ void RoundImageCheckbox::paint(Painter &p, int x, int y, int outerWidth) {
 }
 
 float64 RoundImageCheckbox::checkedAnimationRatio() const {
-	return snap(_selection.value(checked() ? 1. : 0.), 0., 1.);
+	return std::clamp(_selection.value(checked() ? 1. : 0.), 0., 1.);
 }
 
-void RoundImageCheckbox::setChecked(bool newChecked, SetStyle speed) {
+void RoundImageCheckbox::setChecked(bool newChecked, anim::type animated) {
 	auto changed = (checked() != newChecked);
-	_check.setChecked(newChecked, speed);
+	_check.setChecked(newChecked, animated);
 	if (!changed) {
-		if (speed != SetStyle::Animated) {
+		if (animated == anim::type::instant) {
 			_selection.stop();
 		}
 		return;
 	}
-	if (speed == SetStyle::Animated) {
+	if (animated == anim::type::normal) {
 		prepareWideCache();
 		_selection.start(_updateCallback, checked() ? 0 : 1, checked() ? 1 : 0, _st.selectDuration, anim::bumpy(1.25));
 	} else {

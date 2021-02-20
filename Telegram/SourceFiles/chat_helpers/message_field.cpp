@@ -12,28 +12,35 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history_item.h" // HistoryItem::originalText
 #include "base/qthelp_regex.h"
 #include "base/qthelp_url.h"
+#include "base/event_filter.h"
 #include "boxes/abstract_box.h"
+#include "core/shortcuts.h"
+#include "core/application.h"
+#include "core/core_settings.h"
 #include "ui/wrap/vertical_layout.h"
 #include "ui/widgets/popup_menu.h"
 #include "ui/ui_utility.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
-#include "core/event_filter.h"
 #include "chat_helpers/emoji_suggestions_widget.h"
 #include "window/window_session_controller.h"
 #include "lang/lang_keys.h"
 #include "mainwindow.h"
 #include "main/main_session.h"
+#include "styles/style_layers.h"
 #include "styles/style_boxes.h"
-#include "styles/style_history.h"
+#include "styles/style_chat.h"
 
 #include <QtCore/QMimeData>
 #include <QtCore/QStack>
 #include <QtGui/QGuiApplication>
 #include <QtGui/QTextBlock>
 #include <QtGui/QClipboard>
+#include <QtWidgets/QApplication>
 
 namespace {
+
+using namespace Ui::Text;
 
 using EditLinkAction = Ui::InputField::EditLinkAction;
 using EditLinkSelection = Ui::InputField::EditLinkSelection;
@@ -43,25 +50,21 @@ constexpr auto kParseLinksTimeout = crl::time(1000);
 // For mention tags save and validate userId, ignore tags for different userId.
 class FieldTagMimeProcessor : public Ui::InputField::TagMimeProcessor {
 public:
-	QString tagFromMimeTag(const QString &mimeTag) override {
-		if (TextUtilities::IsMentionLink(mimeTag)) {
-			auto match = QRegularExpression(":(\\d+)$").match(mimeTag);
-			if (!match.hasMatch()
-				|| match.capturedRef(1).toInt() != Auth().userId()) {
-				return QString();
-			}
-			return mimeTag.mid(0, mimeTag.size() - match.capturedLength());
-		}
-		return mimeTag;
-	}
+	explicit FieldTagMimeProcessor(
+		not_null<Window::SessionController*> controller);
+
+	QString tagFromMimeTag(const QString &mimeTag) override;
+
+private:
+	const not_null<Window::SessionController*> _controller;
 
 };
 
-class EditLinkBox : public BoxContent {
+class EditLinkBox : public Ui::BoxContent {
 public:
 	EditLinkBox(
 		QWidget*,
-		not_null<Main::Session*> session,
+		not_null<Window::SessionController*> controller,
 		const QString &text,
 		const QString &link,
 		Fn<void(QString, QString)> callback);
@@ -72,13 +75,31 @@ protected:
 	void prepare() override;
 
 private:
-	const not_null<Main::Session*> _session;
+	const not_null<Window::SessionController*> _controller;
 	QString _startText;
 	QString _startLink;
 	Fn<void(QString, QString)> _callback;
 	Fn<void()> _setInnerFocus;
 
 };
+
+FieldTagMimeProcessor::FieldTagMimeProcessor(
+	not_null<Window::SessionController*> controller)
+: _controller(controller) {
+}
+
+QString FieldTagMimeProcessor::tagFromMimeTag(const QString &mimeTag) {
+	if (TextUtilities::IsMentionLink(mimeTag)) {
+		const auto userId = _controller->session().userId();
+		auto match = QRegularExpression(":(\\d+)$").match(mimeTag);
+		if (!match.hasMatch()
+			|| match.capturedRef(1).toInt() != userId) {
+			return QString();
+		}
+		return mimeTag.mid(0, mimeTag.size() - match.capturedLength());
+	}
+	return mimeTag;
+}
 
 //bool ValidateUrl(const QString &value) {
 //	const auto match = qthelp::RegExpDomain().match(value);
@@ -92,11 +113,11 @@ private:
 
 EditLinkBox::EditLinkBox(
 	QWidget*,
-	not_null<Main::Session*> session,
+	not_null<Window::SessionController*> controller,
 	const QString &text,
 	const QString &link,
 	Fn<void(QString, QString)> callback)
-: _session(session)
+: _controller(controller)
 , _startText(text)
 , _startLink(link)
 , _callback(std::move(callback)) {
@@ -112,6 +133,7 @@ void EditLinkBox::setInnerFocus() {
 void EditLinkBox::prepare() {
 	const auto content = Ui::CreateChild<Ui::VerticalLayout>(this);
 
+	const auto session = &_controller->session();
 	const auto text = content->add(
 		object_ptr<Ui::InputField>(
 			content,
@@ -121,19 +143,33 @@ void EditLinkBox::prepare() {
 		st::markdownLinkFieldPadding);
 	text->setInstantReplaces(Ui::InstantReplaces::Default());
 	text->setInstantReplacesEnabled(
-		_session->settings().replaceEmojiValue());
+		Core::App().settings().replaceEmojiValue());
 	Ui::Emoji::SuggestionsController::Init(
 		getDelegate()->outerContainer(),
 		text,
-		_session);
+		session);
+	InitSpellchecker(_controller, text);
 
-	const auto url = content->add(
-		object_ptr<Ui::InputField>(
+	const auto placeholder = content->add(
+		object_ptr<Ui::RpWidget>(content),
+		st::markdownLinkFieldPadding);
+	placeholder->setAttribute(Qt::WA_TransparentForMouseEvents);
+	const auto url = Ui::AttachParentChild(
+		content,
+		object_ptr<Ui::MaskedInputField>(
 			content,
 			st::defaultInputField,
 			tr::lng_formatting_link_url(),
-			_startLink.trimmed()),
-		st::markdownLinkFieldPadding);
+			_startLink.trimmed()));
+	url->heightValue(
+	) | rpl::start_with_next([placeholder](int height) {
+		placeholder->resize(placeholder->width(), height);
+	}, placeholder->lifetime());
+	placeholder->widthValue(
+	) | rpl::start_with_next([=](int width) {
+		url->resize(width, url->height());
+	}, placeholder->lifetime());
+	url->move(placeholder->pos());
 
 	const auto submit = [=] {
 		const auto linkText = text->getLastText();
@@ -155,7 +191,7 @@ void EditLinkBox::prepare() {
 	connect(text, &Ui::InputField::submitted, [=] {
 		url->setFocusFast();
 	});
-	connect(url, &Ui::InputField::submitted, [=] {
+	connect(url, &Ui::MaskedInputField::submitted, [=] {
 		if (text->getLastText().isEmpty()) {
 			text->setFocusFast();
 		} else {
@@ -175,7 +211,11 @@ void EditLinkBox::prepare() {
 	setDimensions(st::boxWidth, content->height());
 
 	_setInnerFocus = [=] {
-		(_startText.isEmpty() ? text : url)->setFocusFast();
+		if (_startText.isEmpty()) {
+			text->setFocusFast();
+		} else {
+			url->setFocusFast();
+		}
 	};
 }
 
@@ -229,7 +269,7 @@ Fn<bool(
 	QString text,
 	QString link,
 	EditLinkAction action)> DefaultEditLinkCallback(
-		not_null<Main::Session*> session,
+		not_null<Window::SessionController*> controller,
 		not_null<Ui::InputField*> field) {
 	const auto weak = Ui::MakeWeak(field);
 	return [=](
@@ -241,13 +281,13 @@ Fn<bool(
 			return Ui::InputField::IsValidMarkdownLink(link)
 				&& !TextUtilities::IsMentionLink(link);
 		}
-		Ui::show(Box<EditLinkBox>(session, text, link, [=](
+		Ui::show(Box<EditLinkBox>(controller, text, link, [=](
 				const QString &text,
 				const QString &link) {
 			if (const auto strong = weak.data()) {
 				strong->commitMarkdownLinkEdit(selection, text, link);
 			}
-		}), LayerOption::KeepOther);
+		}), Ui::LayerOption::KeepOther);
 		return true;
 	};
 }
@@ -258,7 +298,8 @@ void InitMessageField(
 	field->setMinHeight(st::historySendSize.height() - 2 * st::historySendPadding);
 	field->setMaxHeight(st::historyComposeFieldMaxHeight);
 
-	field->setTagMimeProcessor(std::make_unique<FieldTagMimeProcessor>());
+	field->setTagMimeProcessor(
+		std::make_unique<FieldTagMimeProcessor>(controller));
 
 	field->document()->setDocumentMargin(4.);
 	field->setAdditionalMargin(style::ConvertScale(4) - 4);
@@ -266,10 +307,24 @@ void InitMessageField(
 	field->customTab(true);
 	field->setInstantReplaces(Ui::InstantReplaces::Default());
 	field->setInstantReplacesEnabled(
-		controller->session().settings().replaceEmojiValue());
+		Core::App().settings().replaceEmojiValue());
 	field->setMarkdownReplacesEnabled(rpl::single(true));
-	field->setEditLinkCallback(
-		DefaultEditLinkCallback(&controller->session(), field));
+	field->setEditLinkCallback(DefaultEditLinkCallback(controller, field));
+}
+
+void InitSpellchecker(
+		not_null<Window::SessionController*> controller,
+		not_null<Ui::InputField*> field) {
+#ifndef TDESKTOP_DISABLE_SPELLCHECK
+	const auto s = Ui::CreateChild<Spellchecker::SpellingHighlighter>(
+		field.get(),
+		Core::App().settings().spellcheckerEnabledValue(),
+		Spellchecker::SpellingHighlighter::CustomContextMenuItem{
+			tr::lng_settings_manage_dictionaries(tr::now),
+			[=] { Ui::show(Box<Ui::ManageDictionariesBox>(controller)); }
+		});
+	field->setExtendedContextMenu(s->contextMenuCreated());
+#endif // TDESKTOP_DISABLE_SPELLCHECK
 }
 
 bool HasSendText(not_null<const Ui::InputField*> field) {
@@ -279,14 +334,16 @@ bool HasSendText(not_null<const Ui::InputField*> field) {
 		if (code != ' '
 			&& code != '\n'
 			&& code != '\r'
-			&& !chReplacedBySpace(code)) {
+			&& !IsReplacedBySpace(code)) {
 			return true;
 		}
 	}
 	return false;
 }
 
-InlineBotQuery ParseInlineBotQuery(not_null<const Ui::InputField*> field) {
+InlineBotQuery ParseInlineBotQuery(
+		not_null<Main::Session*> session,
+		not_null<const Ui::InputField*> field) {
 	auto result = InlineBotQuery();
 
 	const auto &full = field->getTextWithTags();
@@ -324,7 +381,7 @@ InlineBotQuery ParseInlineBotQuery(not_null<const Ui::InputField*> field) {
 			auto username = text.midRef(inlineUsernameStart, inlineUsernameLength);
 			if (username != result.username) {
 				result.username = username.toString();
-				if (const auto peer = Auth().data().peerByUsername(result.username)) {
+				if (const auto peer = session->data().peerByUsername(result.username)) {
 					if (const auto user = peer->asUser()) {
 						result.bot = peer->asUser();
 					} else {
@@ -442,6 +499,11 @@ MessageLinksParser::MessageLinksParser(not_null<Ui::InputField*> field)
 		_lastLength = length;
 	});
 	_field->installEventFilter(this);
+}
+
+void MessageLinksParser::parseNow() {
+	_timer.cancel();
+	parse();
 }
 
 bool MessageLinksParser::eventFilter(QObject *object, QEvent *event) {
@@ -566,13 +628,14 @@ void MessageLinksParser::parse() {
 		const QChar *domainEnd = start + m.capturedEnd(), *p = domainEnd;
 		for (; p < end; ++p) {
 			QChar ch(*p);
-			if (chIsLinkEnd(ch)) break; // link finished
-			if (chIsAlmostLinkEnd(ch)) {
+			if (IsLinkEnd(ch)) {
+				break; // link finished
+			} else if (IsAlmostLinkEnd(ch)) {
 				const QChar *endTest = p + 1;
-				while (endTest < end && chIsAlmostLinkEnd(*endTest)) {
+				while (endTest < end && IsAlmostLinkEnd(*endTest)) {
 					++endTest;
 				}
-				if (endTest >= end || chIsLinkEnd(*endTest)) {
+				if (endTest >= end || IsLinkEnd(*endTest)) {
 					break; // link finished at p
 				}
 				p = endTest;
@@ -643,42 +706,4 @@ void MessageLinksParser::apply(
 		parsed.push_back(computeLink(range).toString());
 	}
 	_list = std::move(parsed);
-}
-
-void SetupSendMenu(
-		not_null<Ui::RpWidget*> button,
-		Fn<SendMenuType()> type,
-		Fn<void()> silent,
-		Fn<void()> schedule) {
-	if (!silent && !schedule) {
-		return;
-	}
-	const auto menu = std::make_shared<base::unique_qptr<Ui::PopupMenu>>();
-	const auto showMenu = [=] {
-		const auto now = type();
-		if (now == SendMenuType::Disabled
-			|| (!silent && now == SendMenuType::SilentOnly)) {
-			return false;
-		}
-
-		*menu = base::make_unique_q<Ui::PopupMenu>(button);
-		if (silent && now != SendMenuType::Reminder) {
-			(*menu)->addAction(tr::lng_send_silent_message(tr::now), silent);
-		}
-		if (schedule && now != SendMenuType::SilentOnly) {
-			(*menu)->addAction(
-				(now == SendMenuType::Scheduled
-					? tr::lng_schedule_message(tr::now)
-					: tr::lng_reminder_message(tr::now)),
-				schedule);
-		}
-		(*menu)->popup(QCursor::pos());
-		return true;
-	};
-	Core::InstallEventFilter(button, [=](not_null<QEvent*> e) {
-		if (e->type() == QEvent::ContextMenu && showMenu()) {
-			return Core::EventFilter::Result::Cancel;
-		}
-		return Core::EventFilter::Result::Continue;
-	});
 }

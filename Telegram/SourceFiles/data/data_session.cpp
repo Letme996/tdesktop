@@ -7,34 +7,38 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_session.h"
 
-#include "observer_peer.h"
 #include "main/main_session.h"
+#include "main/main_session_settings.h"
+#include "main/main_account.h"
 #include "apiwrap.h"
 #include "mainwidget.h"
 #include "api/api_text_entities.h"
 #include "core/application.h"
+#include "core/mime_type.h" // Core::IsMimeSticker
 #include "core/crash_reports.h" // CrashReports::SetAnnotation
 #include "ui/image/image.h"
-#include "ui/image/image_source.h" // Images::LocalFileSource
-#include "export/export_controller.h"
+#include "ui/image/image_location_factory.h" // Images::FromPhotoSize
+#include "export/export_manager.h"
 #include "export/view/export_view_panel_controller.h"
+#include "mtproto/mtproto_config.h"
 #include "window/notifications_manager.h"
 #include "history/history.h"
 #include "history/history_item_components.h"
 #include "history/view/media/history_view_media.h"
 #include "history/view/history_view_element.h"
+#include "history/view/history_view_send_action.h"
 #include "inline_bots/inline_bot_layout_item.h"
-#include "storage/localstorage.h"
+#include "storage/storage_account.h"
 #include "storage/storage_encrypted_file.h"
-#include "main/main_account.h"
 #include "media/player/media_player_instance.h" // instance()->play()
-#include "media/streaming/media_streaming_loader.h" // unique_ptr<Loader>
-#include "media/streaming/media_streaming_reader.h" // make_shared<Reader>
+#include "media/audio/media_audio.h"
 #include "boxes/abstract_box.h"
-#include "platform/platform_info.h"
 #include "passport/passport_form_controller.h"
 #include "window/themes/window_theme.h"
 #include "lang/lang_keys.h" // tr::lng_deleted(tr::now) in user name
+#include "data/stickers/data_stickers.h"
+#include "data/data_changes.h"
+#include "data/data_group_call.h"
 #include "data/data_media_types.h"
 #include "data/data_folder.h"
 #include "data/data_channel.h"
@@ -46,10 +50,17 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_web_page.h"
 #include "data/data_game.h"
 #include "data/data_poll.h"
+#include "data/data_chat_filters.h"
 #include "data/data_scheduled_messages.h"
 #include "data/data_cloud_themes.h"
+#include "data/data_streaming.h"
+#include "data/data_media_rotation.h"
+#include "data/data_histories.h"
+#include "base/platform/base_platform_info.h"
 #include "base/unixtime.h"
-#include "facades.h"
+#include "base/call_delayed.h"
+#include "base/openssl_help.h"
+#include "facades.h" // Notify::switchInlineBotButtonReceived
 #include "app.h"
 #include "styles/style_boxes.h" // st::backgroundSize
 
@@ -70,17 +81,17 @@ using ViewElement = HistoryView::Element;
 // b: crop 320x320
 // c: crop 640x640
 // d: crop 1280x1280
-const auto InlineLevels = QByteArray::fromRawData("i", 1);
-const auto SmallLevels = QByteArray::fromRawData("sambcxydwi", 10);
-const auto ThumbnailLevels = QByteArray::fromRawData("mbcxasydwi", 10);
-const auto LargeLevels = QByteArray::fromRawData("yxwmsdcbai", 10);
+const auto InlineLevels = "i"_q;
+const auto SmallLevels = "sa"_q;
+const auto ThumbnailLevels = "mbsa"_q;
+const auto LargeLevels = "ydxcwmbsa"_q;
 
 void CheckForSwitchInlineButton(not_null<HistoryItem*> item) {
 	if (item->out() || !item->hasSwitchInlineButton()) {
 		return;
 	}
 	if (const auto user = item->history()->peer->asUser()) {
-		if (!user->isBot() || !user->botInfo->inlineReturnPeerId) {
+		if (!user->isBot() || !user->botInfo->inlineReturnTo.key) {
 			return;
 		}
 		if (const auto markup = item->Get<HistoryMessageReplyMarkup>()) {
@@ -89,6 +100,7 @@ void CheckForSwitchInlineButton(not_null<HistoryItem*> item) {
 					using ButtonType = HistoryMessageMarkupButton::Type;
 					if (button.type == ButtonType::SwitchInline) {
 						Notify::switchInlineBotButtonReceived(
+							&item->history()->session(),
 							QString::fromUtf8(button.data));
 						return;
 					}
@@ -100,53 +112,51 @@ void CheckForSwitchInlineButton(not_null<HistoryItem*> item) {
 
 // We should get a full restriction in "{full}: {reason}" format and we
 // need to find an "-all" tag in {full}, otherwise ignore this restriction.
-QString ExtractUnavailableReason(
+std::vector<UnavailableReason> ExtractUnavailableReasons(
 		const QVector<MTPRestrictionReason> &restrictions) {
-	auto &&texts = ranges::view::all(
+	return ranges::view::all(
 		restrictions
-	) | ranges::view::transform([](const MTPRestrictionReason &restriction) {
+	) | ranges::view::filter([](const MTPRestrictionReason &restriction) {
 		return restriction.match([&](const MTPDrestrictionReason &data) {
 			const auto platform = qs(data.vplatform());
-			return (false
+			return false
 #ifdef OS_MAC_STORE
 				|| (platform == qstr("ios"))
 #elif defined OS_WIN_STORE // OS_MAC_STORE
 				|| (platform == qstr("ms"))
 #endif // OS_MAC_STORE || OS_WIN_STORE
-				|| (platform == qstr("all")))
-				? std::make_optional(qs(data.vtext()))
-				: std::nullopt;
+				|| (platform == qstr("all"));
 		});
-	}) | ranges::view::filter([](const std::optional<QString> &value) {
-		return value.has_value();
-	}) | ranges::view::transform([](const std::optional<QString> &value) {
-		return *value;
-	});
-	const auto begin = texts.begin();
-	return (begin != texts.end()) ? *begin : nullptr;
+	}) | ranges::view::transform([](const MTPRestrictionReason &restriction) {
+		return restriction.match([&](const MTPDrestrictionReason &data) {
+			return UnavailableReason{ qs(data.vreason()), qs(data.vtext()) };
+		});
+	}) | ranges::to_vector;
 }
 
-MTPPhotoSize FindDocumentInlineThumbnail(const MTPDdocument &data) {
-	const auto thumbs = data.vthumbs();
-	if (!thumbs) {
-		return MTP_photoSizeEmpty(MTP_string());
-	}
-	const auto &list = thumbs->v;
+[[nodiscard]] QByteArray FindInlineThumbnail(
+		const QVector<MTPPhotoSize> &sizes) {
 	const auto i = ranges::find(
-		list,
+		sizes,
 		mtpc_photoStrippedSize,
 		&MTPPhotoSize::type);
-	return (i != list.end())
-		? (*i)
-		: MTPPhotoSize(MTP_photoSizeEmpty(MTP_string()));
+	return (i != sizes.end())
+		? i->c_photoStrippedSize().vbytes().v
+		: QByteArray();
 }
 
-MTPPhotoSize FindDocumentThumbnail(const MTPDdocument &data) {
+[[nodiscard]] QByteArray FindDocumentInlineThumbnail(const MTPDdocument &data) {
+	return FindInlineThumbnail(data.vthumbs().value_or_empty());
+}
+
+[[nodiscard]] MTPPhotoSize FindDocumentThumbnail(const MTPDdocument &data) {
 	const auto area = [](const MTPPhotoSize &size) {
 		static constexpr auto kInvalid = 0;
 		return size.match([](const MTPDphotoSizeEmpty &) {
 			return kInvalid;
 		}, [](const MTPDphotoStrippedSize &) {
+			return kInvalid;
+		}, [](const MTPDphotoPathSize &) {
 			return kInvalid;
 		}, [](const auto &data) {
 			return (data.vw().v * data.vh().v);
@@ -163,35 +173,35 @@ MTPPhotoSize FindDocumentThumbnail(const MTPDdocument &data) {
 		: MTPPhotoSize(MTP_photoSizeEmpty(MTP_string()));
 }
 
-rpl::producer<int> PinnedDialogsCountMaxValue(
-		not_null<Main::Session*> session) {
-	return rpl::single(
-		rpl::empty_value()
-	) | rpl::then(
-		session->account().configUpdates()
-	) | rpl::map([=] {
-		return Global::PinnedDialogsCountMax();
-	});
+[[nodiscard]] std::optional<MTPVideoSize> FindDocumentVideoThumbnail(
+		const MTPDdocument &data) {
+	const auto area = [](const MTPVideoSize &size) {
+		static constexpr auto kInvalid = 0;
+		return size.match([](const MTPDvideoSize &data) {
+			return (data.vw().v * data.vh().v);
+		});
+	};
+	const auto thumbs = data.vvideo_thumbs();
+	if (!thumbs) {
+		return std::nullopt;
+	}
+	const auto &list = thumbs->v;
+	const auto i = ranges::max_element(list, std::less<>(), area);
+	return (i != list.end() && area(*i) > 0)
+		? std::make_optional(*i)
+		: std::nullopt;
 }
 
-bool PruneDestroyedAndSet(
-		base::flat_map<
-			not_null<DocumentData*>,
-			std::weak_ptr<::Media::Streaming::Reader>> &readers,
-		not_null<DocumentData*> document,
-		const std::shared_ptr<::Media::Streaming::Reader> &reader) {
-	auto result = false;
-	for (auto i = begin(readers); i != end(readers);) {
-		if (i->first == document) {
-			(i++)->second = reader;
-			result = true;
-		} else if (i->second.lock() != nullptr) {
-			++i;
-		} else {
-			i = readers.erase(i);
-		}
-	}
-	return result;
+[[nodiscard]] QByteArray FindPhotoInlineThumbnail(const MTPDphoto &data) {
+	return FindInlineThumbnail(data.vsizes().v);
+}
+
+[[nodiscard]] int VideoStartTime(const MTPDvideoSize &data) {
+	return int(
+		std::clamp(
+			std::floor(data.vvideo_start_ts().value_or_empty() * 1000),
+			0.,
+			double(std::numeric_limits<int>::max())));
 }
 
 } // namespace
@@ -199,45 +209,70 @@ bool PruneDestroyedAndSet(
 Session::Session(not_null<Main::Session*> session)
 : _session(session)
 , _cache(Core::App().databases().get(
-	Local::cachePath(),
-	Local::cacheSettings()))
+	_session->local().cachePath(),
+	_session->local().cacheSettings()))
 , _bigFileCache(Core::App().databases().get(
-	Local::cacheBigFilePath(),
-	Local::cacheBigFileSettings()))
-, _chatsList(PinnedDialogsCountMaxValue(session))
+	_session->local().cacheBigFilePath(),
+	_session->local().cacheBigFileSettings()))
+, _chatsList(
+	session,
+	FilterId(),
+	session->serverConfig().pinnedDialogsCountMax.value())
 , _contactsList(Dialogs::SortMode::Name)
 , _contactsNoChatsList(Dialogs::SortMode::Name)
 , _selfDestructTimer([=] { checkSelfDestructItems(); })
 , _sendActionsAnimation([=](crl::time now) {
 	return sendActionsAnimationCallback(now);
 })
+, _pollsClosingTimer([=] { checkPollsClosings(); })
 , _unmuteByFinishedTimer([=] { unmuteByFinished(); })
 , _groups(this)
+, _chatsFilters(std::make_unique<ChatFilters>(this))
 , _scheduledMessages(std::make_unique<ScheduledMessages>(this))
-, _cloudThemes(std::make_unique<CloudThemes>(session)) {
-	_cache->open(Local::cacheKey());
-	_bigFileCache->open(Local::cacheBigFileKey());
+, _cloudThemes(std::make_unique<CloudThemes>(session))
+, _streaming(std::make_unique<Streaming>(this))
+, _mediaRotation(std::make_unique<MediaRotation>())
+, _histories(std::make_unique<Histories>(this))
+, _stickers(std::make_unique<Stickers>(this)) {
+	_cache->open(_session->local().cacheKey());
+	_bigFileCache->open(_session->local().cacheBigFileKey());
 
 	if constexpr (Platform::IsLinux()) {
-		const auto wasVersion = Local::oldMapVersion();
+		const auto wasVersion = _session->local().oldMapVersion();
 		if (wasVersion >= 1007011 && wasVersion < 1007015) {
 			_bigFileCache->clear();
 			_cache->clearByTag(Data::kImageCacheTag);
 		}
 	}
 
-	setupContactViewsViewer();
+	setupMigrationViewer();
 	setupChannelLeavingViewer();
 	setupPeerNameViewer();
 	setupUserIsContactViewer();
+
+	_chatsList.unreadStateChanges(
+	) | rpl::start_with_next([=] {
+		notifyUnreadBadgeChanged();
+	}, _lifetime);
+
+	_chatsFilters->changed(
+	) | rpl::start_with_next([=] {
+		const auto enabled = !_chatsFilters->list().empty();
+		if (enabled != session->settings().dialogsFiltersEnabled()) {
+			session->settings().setDialogsFiltersEnabled(enabled);
+			session->saveSettingsDelayed();
+		}
+	}, _lifetime);
+
 }
 
 void Session::clear() {
+	// Optimization: clear notifications before destroying items.
+	Core::App().notifications().clearFromSession(_session);
+
 	_sendActions.clear();
 
-	for (const auto &[peerId, history] : _histories) {
-		history->clear(History::ClearType::Unload);
-	}
+	_histories->unloadAll();
 	_scheduledMessages = nullptr;
 	_dependentMessages.clear();
 	base::take(_messages);
@@ -247,7 +282,25 @@ void Session::clear() {
 	cSetRecentInlineBots(RecentInlineBots());
 	cSetRecentStickers(RecentStickerPack());
 	App::clearMousedItems();
-	_histories.clear();
+	_histories->clearAll();
+	_webpages.clear();
+	_locations.clear();
+	_polls.clear();
+	_games.clear();
+	_documents.clear();
+	_photos.clear();
+}
+
+void Session::keepAlive(std::shared_ptr<PhotoMedia> media) {
+	// NB! This allows PhotoMedia to outlive Main::Session!
+	// In case this is a problem this code should be rewritten.
+	crl::on_main(&session(), [media = std::move(media)]{});
+}
+
+void Session::keepAlive(std::shared_ptr<DocumentMedia> media) {
+	// NB! This allows DocumentMedia to outlive Main::Session!
+	// In case this is a problem this code should be rewritten.
+	crl::on_main(&session(), [media = std::move(media)] {});
 }
 
 not_null<PeerData*> Session::peer(PeerId id) {
@@ -286,7 +339,7 @@ PeerData *Session::peerLoaded(PeerId id) const {
 	const auto i = _peers.find(id);
 	if (i == end(_peers)) {
 		return nullptr;
-	} else if (i->second->loadedStatus != PeerData::FullLoaded) {
+	} else if (!i->second->isFullLoaded()) {
 		return nullptr;
 	}
 	return i->second.get();
@@ -321,8 +374,8 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 	const MTPUserStatus *status = nullptr;
 	const MTPUserStatus emptyStatus = MTP_userStatusEmpty();
 
-	Notify::PeerUpdate update;
-	using UpdateFlag = Notify::PeerUpdate::Flag;
+	using UpdateFlag = PeerUpdate::Flag;
+	auto flags = UpdateFlag::None | UpdateFlag::None;
 	data.match([&](const MTPDuserEmpty &data) {
 		const auto canShareThisContact = result->canShareThisContactFast();
 
@@ -334,13 +387,13 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 		result->setFlags(MTPDuser::Flag::f_deleted);
 		if (!result->phone().isEmpty()) {
 			result->setPhone(QString());
-			update.flags |= UpdateFlag::UserPhoneChanged;
+			flags |= UpdateFlag::PhoneNumber;
 		}
 		result->setBotInfoVersion(-1);
 		status = &emptyStatus;
 		result->setIsContact(false);
 		if (canShareThisContact != result->canShareThisContactFast()) {
-			update.flags |= UpdateFlag::UserCanShareContact;
+			flags |= UpdateFlag::CanShareContact;
 		}
 	}, [&](const MTPDuser &data) {
 		minimal = data.is_min();
@@ -351,6 +404,16 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 				//| MTPDuser_ClientFlag::f_inaccessible
 				| MTPDuser::Flag::f_deleted;
 			result->setFlags((result->flags() & ~mask) | (data.vflags().v & mask));
+			if (result->input.type() == mtpc_inputPeerEmpty) {
+				result->input = MTP_inputPeerUser(
+					data.vid(),
+					MTP_long(data.vaccess_hash().value_or_empty()));
+			}
+			if (result->inputUser.type() == mtpc_inputUserEmpty) {
+				result->inputUser = MTP_inputUser(
+					data.vid(),
+					MTP_long(data.vaccess_hash().value_or_empty()));
+			}
 		} else {
 			result->setFlags(data.vflags().v);
 			if (data.is_self()) {
@@ -364,16 +427,16 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 				result->inputUser = MTP_inputUser(data.vid(), MTP_long(result->accessHash()));
 			}
 			if (const auto restriction = data.vrestriction_reason()) {
-				result->setUnavailableReason(
-					ExtractUnavailableReason(restriction->v));
+				result->setUnavailableReasons(
+					ExtractUnavailableReasons(restriction->v));
 			} else {
-				result->setUnavailableReason(QString());
+				result->setUnavailableReasons({});
 			}
 		}
 		if (data.is_deleted()) {
 			if (!result->phone().isEmpty()) {
 				result->setPhone(QString());
-				update.flags |= UpdateFlag::UserPhoneChanged;
+				flags |= UpdateFlag::PhoneNumber;
 			}
 			result->setName(tr::lng_deleted(tr::now), QString(), QString(), QString());
 			result->setPhoto(MTP_userProfilePhotoEmpty());
@@ -391,7 +454,7 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 			const auto phoneChanged = (result->phone() != phone);
 			if (phoneChanged) {
 				result->setPhone(phone);
-				update.flags |= UpdateFlag::UserPhoneChanged;
+				flags |= UpdateFlag::PhoneNumber;
 			}
 			const auto nameChanged = (result->firstName != fname)
 				|| (result->lastName != lname);
@@ -415,7 +478,7 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 					&& (result->id != _session->userPeerId());
 			}
 
-			// see also Local::readPeer
+			// see also Serialize::readPeer
 
 			const auto pname = (showPhoneChanged || phoneChanged || nameChanged)
 				? ((showPhone && !phone.isEmpty())
@@ -423,9 +486,6 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 					: QString())
 				: result->nameOrPhone;
 
-			if (!minimal && data.is_self() && uname != result->username) {
-				CrashReports::SetAnnotation("Username", uname);
-			}
 			result->setName(fname, lname, pname, uname);
 			if (const auto photo = data.vphoto()) {
 				result->setPhoto(*photo);
@@ -443,7 +503,7 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 				result->botInfo->readsAllHistory = data.is_bot_chat_history();
 				if (result->botInfo->cantJoinGroups != data.is_bot_nochats()) {
 					result->botInfo->cantJoinGroups = data.is_bot_nochats();
-					update.flags |= UpdateFlag::BotCanAddToGroups;
+					flags |= UpdateFlag::BotCanBeInvited;
 				}
 				if (const auto placeholder = data.vbot_inline_placeholder()) {
 					result->botInfo->inlinePlaceholder = '_' + qs(*placeholder);
@@ -458,17 +518,17 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 		}
 
 		if (canShareThisContact != result->canShareThisContactFast()) {
-			update.flags |= UpdateFlag::UserCanShareContact;
+			flags |= UpdateFlag::CanShareContact;
 		}
 	});
 
 	if (minimal) {
-		if (result->loadedStatus == PeerData::NotLoaded) {
-			result->loadedStatus = PeerData::MinimalLoaded;
+		if (!result->isMinimalLoaded()) {
+			result->setLoadedStatus(PeerData::LoadedStatus::Minimal);
 		}
-	} else if (result->loadedStatus != PeerData::FullLoaded
+	} else if (!result->isFullLoaded()
 		&& (!result->isSelf() || !result->phone().isEmpty())) {
-		result->loadedStatus = PeerData::FullLoaded;
+		result->setLoadedStatus(PeerData::LoadedStatus::Full);
 	}
 
 	if (status && !minimal) {
@@ -478,15 +538,12 @@ not_null<UserData*> Session::processUser(const MTPUser &data) {
 			oldOnlineTill);
 		if (oldOnlineTill != newOnlineTill) {
 			result->onlineTill = newOnlineTill;
-			update.flags |= UpdateFlag::UserOnlineChanged;
+			flags |= UpdateFlag::OnlineStatus;
 		}
 	}
 
-	if (App::main()) {
-		if (update.flags) {
-			update.peer = result;
-			Notify::peerUpdatedDelayed(update);
-		}
+	if (flags) {
+		session().changes().peerUpdated(result, flags);
 	}
 	return result;
 }
@@ -505,9 +562,8 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 	});
 	auto minimal = false;
 
-	Notify::PeerUpdate update;
-	using UpdateFlag = Notify::PeerUpdate::Flag;
-
+	using UpdateFlag = Data::PeerUpdate::Flag;
+	auto flags = UpdateFlag::None | UpdateFlag::None;
 	data.match([&](const MTPDchat &data) {
 		const auto chat = result->asChat();
 
@@ -539,11 +595,7 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 				const auto channel = this->channel(input.vchannel_id().v);
 				channel->addFlags(MTPDchannel::Flag::f_megagroup);
 				if (!channel->access) {
-					channel->input = MTP_inputPeerChannel(
-						input.vchannel_id(),
-						input.vaccess_hash());
-					channel->inputChannel = *migratedTo;
-					channel->access = input.vaccess_hash().v;
+					channel->setAccessHash(input.vaccess_hash().v);
 				}
 				ApplyMigration(chat, channel);
 			}, [](const MTPDinputChannelFromMessage &) {
@@ -553,11 +605,16 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 			});
 		}
 
-		chat->setFlags(data.vflags().v);
+		const auto callFlag = MTPDchat::Flag::f_call_not_empty;
+		const auto callNotEmpty = (data.vflags().v & callFlag)
+			|| (chat->groupCall()
+				&& chat->groupCall()->fullCount() > 0);
+		chat->setFlags(data.vflags().v
+			| (callNotEmpty ? callFlag : MTPDchat::Flag(0)));
 		chat->count = data.vparticipants_count().v;
 
 		if (canAddMembers != chat->canAddMembers()) {
-			update.flags |= UpdateFlag::RightsChanged;
+			flags |= UpdateFlag::Rights;
 		}
 	}, [&](const MTPDchatForbidden &data) {
 		const auto chat = result->asChat();
@@ -576,20 +633,14 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 			MTP_chatBannedRights(MTP_flags(0), MTP_int(0)));
 
 		if (canAddMembers != chat->canAddMembers()) {
-			update.flags |= UpdateFlag::RightsChanged;
+			flags |= UpdateFlag::Rights;
 		}
 	}, [&](const MTPDchannel &data) {
 		const auto channel = result->asChannel();
 
 		minimal = data.is_min();
-		if (minimal) {
-			if (result->loadedStatus != PeerData::FullLoaded) {
-				LOG(("API Warning: not loaded minimal channel applied."));
-			}
-		} else {
-			channel->input = MTP_inputPeerChannel(
-				data.vid(),
-				MTP_long(data.vaccess_hash().value_or_empty()));
+		if (minimal && !result->isFullLoaded()) {
+			LOG(("API Warning: not loaded minimal channel applied."));
 		}
 
 		const auto wasInChannel = channel->amIn();
@@ -606,13 +657,25 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 			channel->setDefaultRestrictions(
 				MTP_chatBannedRights(MTP_flags(0), MTP_int(0)));
 		}
+		const auto callFlag = MTPDchannel::Flag::f_call_not_empty;
+		const auto callNotEmpty = (data.vflags().v & callFlag)
+			|| (channel->groupCall()
+				&& channel->groupCall()->fullCount() > 0);
 		if (minimal) {
 			auto mask = 0
 				| MTPDchannel::Flag::f_broadcast
 				| MTPDchannel::Flag::f_verified
 				| MTPDchannel::Flag::f_megagroup
+				| MTPDchannel::Flag::f_call_active
+				| MTPDchannel::Flag::f_call_not_empty
 				| MTPDchannel_ClientFlag::f_forbidden;
-			channel->setFlags((channel->flags() & ~mask) | (data.vflags().v & mask));
+			channel->setFlags((channel->flags() & ~mask)
+				| (data.vflags().v & mask)
+				| (callNotEmpty ? callFlag : MTPDchannel::Flag(0)));
+			if (channel->input.type() == mtpc_inputPeerEmpty
+				|| channel->inputChannel.type() == mtpc_inputChannelEmpty) {
+				channel->setAccessHash(data.vaccess_hash().value_or_empty());
+			}
 		} else {
 			if (const auto rights = data.vadmin_rights()) {
 				channel->setAdminRights(*rights);
@@ -625,22 +688,20 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 				channel->setRestrictions(
 					MTP_chatBannedRights(MTP_flags(0), MTP_int(0)));
 			}
-			const auto hash = data.vaccess_hash().value_or(channel->access);
-			channel->inputChannel = MTP_inputChannel(
-				data.vid(),
-				MTP_long(hash));
-			channel->access = hash;
+			channel->setAccessHash(
+				data.vaccess_hash().value_or(channel->access));
 			channel->date = data.vdate().v;
 			if (channel->version() < data.vversion().v) {
 				channel->setVersion(data.vversion().v);
 			}
 			if (const auto restriction = data.vrestriction_reason()) {
-				channel->setUnavailableReason(
-					ExtractUnavailableReason(restriction->v));
+				channel->setUnavailableReasons(
+					ExtractUnavailableReasons(restriction->v));
 			} else {
-				channel->setUnavailableReason(QString());
+				channel->setUnavailableReasons({});
 			}
-			channel->setFlags(data.vflags().v);
+			channel->setFlags(data.vflags().v
+				| (callNotEmpty ? callFlag : MTPDchannel::Flag(0)));
 			//if (const auto feedId = data.vfeed_id()) { // #feed
 			//	channel->setFeed(feed(feedId->v));
 			//} else {
@@ -655,23 +716,20 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 		channel->setPhoto(data.vphoto());
 
 		if (wasInChannel != channel->amIn()) {
-			update.flags |= UpdateFlag::ChannelAmIn;
+			flags |= UpdateFlag::ChannelAmIn;
 		}
 		if (canViewAdmins != channel->canViewAdmins()
 			|| canViewMembers != channel->canViewMembers()
 			|| canAddMembers != channel->canAddMembers()) {
-			update.flags |= UpdateFlag::RightsChanged;
+			flags |= UpdateFlag::Rights;
 		}
 	}, [&](const MTPDchannelForbidden &data) {
 		const auto channel = result->asChannel();
-		channel->input = MTP_inputPeerChannel(data.vid(), data.vaccess_hash());
 
 		auto wasInChannel = channel->amIn();
 		auto canViewAdmins = channel->canViewAdmins();
 		auto canViewMembers = channel->canViewMembers();
 		auto canAddMembers = channel->canAddMembers();
-
-		channel->inputChannel = MTP_inputChannel(data.vid(), data.vaccess_hash());
 
 		auto mask = mtpCastFlags(MTPDchannelForbidden::Flag::f_broadcast | MTPDchannelForbidden::Flag::f_megagroup);
 		channel->setFlags((channel->flags() & ~mask) | (mtpCastFlags(data.vflags()) & mask) | MTPDchannel_ClientFlag::f_forbidden);
@@ -685,32 +743,31 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 
 		channel->setName(qs(data.vtitle()), QString());
 
-		channel->access = data.vaccess_hash().v;
+		channel->setAccessHash(data.vaccess_hash().v);
 		channel->setPhoto(MTP_chatPhotoEmpty());
 		channel->date = 0;
 		channel->setMembersCount(0);
 
 		if (wasInChannel != channel->amIn()) {
-			update.flags |= UpdateFlag::ChannelAmIn;
+			flags |= UpdateFlag::ChannelAmIn;
 		}
 		if (canViewAdmins != channel->canViewAdmins()
 			|| canViewMembers != channel->canViewMembers()
 			|| canAddMembers != channel->canAddMembers()) {
-			update.flags |= UpdateFlag::RightsChanged;
+			flags |= UpdateFlag::Rights;
 		}
 	}, [](const MTPDchatEmpty &) {
 	});
 
 	if (minimal) {
-		if (result->loadedStatus == PeerData::NotLoaded) {
-			result->loadedStatus = PeerData::MinimalLoaded;
+		if (!result->isMinimalLoaded()) {
+			result->setLoadedStatus(PeerData::LoadedStatus::Minimal);
 		}
-	} else if (result->loadedStatus != PeerData::FullLoaded) {
-		result->loadedStatus = PeerData::FullLoaded;
+	} else if (!result->isFullLoaded()) {
+		result->setLoadedStatus(PeerData::LoadedStatus::Full);
 	}
-	if (update.flags) {
-		update.peer = result;
-		Notify::peerUpdatedDelayed(update);
+	if (flags) {
+		session().changes().peerUpdated(result, flags);
 	}
 	return result;
 }
@@ -747,6 +804,56 @@ void Session::applyMaximumChatVersions(const MTPVector<MTPChat> &data) {
 			}
 		}, [](const auto &) {
 		});
+	}
+}
+
+void Session::registerGroupCall(not_null<GroupCall*> call) {
+	_groupCalls.emplace(call->id(), call);
+}
+
+void Session::unregisterGroupCall(not_null<GroupCall*> call) {
+	_groupCalls.remove(call->id());
+}
+
+GroupCall *Session::groupCall(uint64 callId) const {
+	const auto i = _groupCalls.find(callId);
+	return (i != end(_groupCalls)) ? i->second.get() : nullptr;
+}
+
+auto Session::invitedToCallUsers(uint64 callId) const
+-> const base::flat_set<not_null<UserData*>> & {
+	static const base::flat_set<not_null<UserData*>> kEmpty;
+	const auto i = _invitedToCallUsers.find(callId);
+	return (i != _invitedToCallUsers.end()) ? i->second : kEmpty;
+}
+
+void Session::registerInvitedToCallUser(
+		uint64 callId,
+		not_null<PeerData*> peer,
+		not_null<UserData*> user) {
+	const auto call = peer->groupCall();
+	if (call && call->id() == callId) {
+		const auto inCall = ranges::contains(
+			call->participants(),
+			user,
+			&Data::GroupCall::Participant::user);
+		if (inCall) {
+			return;
+		}
+	}
+	_invitedToCallUsers[callId].emplace(user);
+	_invitesToCalls.fire({ callId, user });
+}
+
+void Session::unregisterInvitedToCallUser(
+		uint64 callId,
+		not_null<UserData*> user) {
+	const auto i = _invitedToCallUsers.find(callId);
+	if (i != _invitedToCallUsers.end()) {
+		i->second.remove(user);
+		if (i->second.empty()) {
+			_invitedToCallUsers.erase(i);
+		}
 	}
 }
 
@@ -788,20 +895,11 @@ void Session::enumerateChannels(
 }
 
 not_null<History*> Session::history(PeerId peerId) {
-	Expects(peerId != 0);
-
-	if (const auto result = historyLoaded(peerId)) {
-		return result;
-	}
-	const auto [i, ok] = _histories.emplace(
-		peerId,
-		std::make_unique<History>(this, peerId));
-	return i->second.get();
+	return _histories->findOrCreate(peerId);
 }
 
 History *Session::historyLoaded(PeerId peerId) const {
-	const auto i = peerId ? _histories.find(peerId) : end(_histories);
-	return (i != end(_histories)) ? i->second.get() : nullptr;
+	return _histories->find(peerId);
 }
 
 not_null<History*> Session::history(not_null<const PeerData*> peer) {
@@ -816,9 +914,9 @@ void Session::deleteConversationLocally(not_null<PeerData*> peer) {
 	const auto history = historyLoaded(peer);
 	if (history) {
 		if (history->folderKnown()) {
-			setChatPinned(history, false);
+			setChatPinned(history, FilterId(), false);
 		}
-		App::main()->removeDialog(history);
+		removeChatListEntry(history);
 		history->clear(peer->isChannel()
 			? History::ClearType::Unload
 			: History::ClearType::DeleteChat);
@@ -833,25 +931,117 @@ void Session::deleteConversationLocally(not_null<PeerData*> peer) {
 	}
 }
 
+void Session::cancelForwarding(not_null<History*> history) {
+	history->setForwardDraft({});
+	session().changes().historyUpdated(
+		history,
+		Data::HistoryUpdate::Flag::ForwardDraft);
+}
+
+HistoryView::SendActionPainter *Session::lookupSendActionPainter(
+		not_null<History*> history,
+		MsgId rootId) {
+	if (!rootId) {
+		return history->sendActionPainter();
+	}
+	const auto i = _sendActionPainters.find(history);
+	if (i == end(_sendActionPainters)) {
+		return nullptr;
+	}
+	const auto j = i->second.find(rootId);
+	if (j == end(i->second)) {
+		return nullptr;
+	}
+	const auto result = j->second.lock();
+	if (!result) {
+		i->second.erase(j);
+		if (i->second.empty()) {
+			_sendActionPainters.erase(i);
+		}
+		return nullptr;
+	}
+	crl::on_main([copy = result] {
+	});
+	return result.get();
+}
+
 void Session::registerSendAction(
 		not_null<History*> history,
+		MsgId rootId,
 		not_null<UserData*> user,
 		const MTPSendMessageAction &action,
 		TimeId when) {
-	if (history->updateSendActionNeedsAnimating(user, action)) {
+	if (history->peer->isSelf()) {
+		return;
+	}
+	const auto sendAction = lookupSendActionPainter(history, rootId);
+	if (!sendAction) {
+		return;
+	}
+	if (sendAction->updateNeedsAnimating(user, action)) {
 		user->madeAction(when);
 
-		const auto i = _sendActions.find(history);
-		if (!_sendActions.contains(history)) {
-			_sendActions.emplace(history, crl::now());
+		const auto i = _sendActions.find(std::pair{ history, rootId });
+		if (!_sendActions.contains(std::pair{ history, rootId })) {
+			_sendActions.emplace(std::pair{ history, rootId }, crl::now());
 			_sendActionsAnimation.start();
 		}
 	}
 }
 
+auto Session::repliesSendActionPainter(
+	not_null<History*> history,
+	MsgId rootId)
+-> std::shared_ptr<SendActionPainter> {
+	auto &weak = _sendActionPainters[history][rootId];
+	if (auto strong = weak.lock()) {
+		return strong;
+	}
+	auto result = std::make_shared<SendActionPainter>(history);
+	weak = result;
+	return result;
+}
+
+void Session::repliesSendActionPainterRemoved(
+		not_null<History*> history,
+		MsgId rootId) {
+	const auto i = _sendActionPainters.find(history);
+	if (i == end(_sendActionPainters)) {
+		return;
+	}
+	const auto j = i->second.find(rootId);
+	if (j == end(i->second) || j->second.lock()) {
+		return;
+	}
+	i->second.erase(j);
+	if (i->second.empty()) {
+		_sendActionPainters.erase(i);
+	}
+}
+
+void Session::repliesSendActionPaintersClear(
+		not_null<History*> history,
+		not_null<UserData*> user) {
+	auto &map = _sendActionPainters[history];
+	for (auto i = map.begin(); i != map.end();) {
+		if (auto strong = i->second.lock()) {
+			strong->clear(user);
+			++i;
+		} else {
+			i = map.erase(i);
+		}
+	}
+	if (map.empty()) {
+		_sendActionPainters.erase(history);
+	}
+}
+
 bool Session::sendActionsAnimationCallback(crl::time now) {
 	for (auto i = begin(_sendActions); i != end(_sendActions);) {
-		if (i->first->updateSendActionNeedsAnimating(now)) {
+		const auto sendAction = lookupSendActionPainter(
+			i->first.first,
+			i->first.second);
+		if (sendAction && sendAction->updateNeedsAnimating(now)) {
 			++i;
 		} else {
 			i = _sendActions.erase(i);
@@ -874,11 +1064,30 @@ void Session::chatsListChanged(Data::Folder *folder) {
 
 void Session::chatsListDone(Data::Folder *folder) {
 	if (folder) {
-		folder->setChatsListLoaded();
+		folder->chatsList()->setLoaded();
 	} else {
 		_chatsList.setLoaded();
 	}
 	_chatsListLoadedEvents.fire_copy(folder);
+}
+
+void Session::userIsBotChanged(not_null<UserData*> user) {
+	if (const auto history = this->history(user)) {
+		chatsFilters().refreshHistory(history);
+	}
+	_userIsBotChanges.fire_copy(user);
+}
+
+rpl::producer<not_null<UserData*>> Session::userIsBotChanges() const {
+	return _userIsBotChanges.events();
+}
+
+void Session::botCommandsChanged(not_null<UserData*> user) {
+	_botCommandsChanges.fire_copy(user);
+}
+
+rpl::producer<not_null<UserData*>> Session::botCommandsChanges() const {
+	return _botCommandsChanges.events();
 }
 
 Storage::Cache::Database &Session::cache() {
@@ -887,28 +1096,6 @@ Storage::Cache::Database &Session::cache() {
 
 Storage::Cache::Database &Session::cacheBigFile() {
 	return *_bigFileCache;
-}
-
-void Session::startExport(PeerData *peer) {
-	startExport(peer ? peer->input : MTP_inputPeerEmpty());
-}
-
-void Session::startExport(const MTPInputPeer &singlePeer) {
-	if (_exportPanel) {
-		_exportPanel->activatePanel();
-		return;
-	}
-	_export = std::make_unique<Export::Controller>(singlePeer);
-	_exportPanel = std::make_unique<Export::View::PanelController>(
-		_export.get());
-
-	_exportViewChanges.fire(_exportPanel.get());
-
-	_exportPanel->stopRequests(
-	) | rpl::start_with_next([=] {
-		LOG(("Export Info: Stop requested."));
-		stopExport();
-	}, _export->lifetime());
 }
 
 void Session::suggestStartExport(TimeId availableAt) {
@@ -933,49 +1120,15 @@ void Session::suggestStartExport() {
 		? 0
 		: (_exportAvailableAt - now);
 	if (left) {
-		App::CallDelayed(
+		base::call_delayed(
 			std::min(left + 5, 3600) * crl::time(1000),
 			_session,
 			[=] { suggestStartExport(); });
-	} else if (_export) {
-		Export::View::ClearSuggestStart();
+	} else if (Core::App().exportManager().inProgress()) {
+		Export::View::ClearSuggestStart(&session());
 	} else {
-		_exportSuggestion = Export::View::SuggestStart();
+		_exportSuggestion = Export::View::SuggestStart(&session());
 	}
-}
-
-rpl::producer<Export::View::PanelController*> Session::currentExportView(
-) const {
-	return _exportViewChanges.events_starting_with(_exportPanel.get());
-}
-
-bool Session::exportInProgress() const {
-	return _export != nullptr;
-}
-
-void Session::stopExportWithConfirmation(FnMut<void()> callback) {
-	if (!_exportPanel) {
-		callback();
-		return;
-	}
-	auto closeAndCall = [=, callback = std::move(callback)]() mutable {
-		auto saved = std::move(callback);
-		LOG(("Export Info: Stop With Confirmation."));
-		stopExport();
-		if (saved) {
-			saved();
-		}
-	};
-	_exportPanel->stopWithConfirmation(std::move(closeAndCall));
-}
-
-void Session::stopExport() {
-	if (_exportPanel) {
-		LOG(("Export Info: Destroying."));
-		_exportPanel = nullptr;
-		_exportViewChanges.fire(nullptr);
-	}
-	_export = nullptr;
 }
 
 const Passport::SavedCredentials *Session::passportCredentials() const {
@@ -991,7 +1144,7 @@ void Session::rememberPassportCredentials(
 	_passportCredentials = std::make_unique<CredentialsWithGeneration>(
 		std::move(data),
 		++generation);
-	App::CallDelayed(rememberFor, _session, [=, check = generation] {
+	base::call_delayed(rememberFor, _session, [=, check = generation] {
 		if (_passportCredentials && _passportCredentials->second == check) {
 			forgetPassportCredentials();
 		}
@@ -1002,79 +1155,90 @@ void Session::forgetPassportCredentials() {
 	_passportCredentials = nullptr;
 }
 
-void Session::setupContactViewsViewer() {
-	Notify::PeerUpdateViewer(
-		Notify::PeerUpdate::Flag::UserIsContact
-	) | rpl::map([](const Notify::PeerUpdate &update) {
-		return update.peer->asUser();
-	}) | rpl::filter([](UserData *user) {
-		return user != nullptr;
-	}) | rpl::start_with_next([=](not_null<UserData*> user) {
-		userIsContactUpdated(user);
+void Session::setupMigrationViewer() {
+	session().changes().peerUpdates(
+		PeerUpdate::Flag::Migration
+	) | rpl::map([](const PeerUpdate &update) {
+		return update.peer->asChat();
+	}) | rpl::filter([=](ChatData *chat) {
+		return (chat != nullptr);
+	}) | rpl::start_with_next([=](not_null<ChatData*> chat) {
+		const auto channel = chat->migrateTo();
+		if (!channel) {
+			return;
+		}
+
+		chat->clearGroupCall();
+		if (const auto from = historyLoaded(chat)) {
+			if (const auto to = historyLoaded(channel)) {
+				if (to->inChatList() && from->inChatList()) {
+					removeChatListEntry(from);
+				}
+			}
+		}
 	}, _lifetime);
 }
 
 void Session::setupChannelLeavingViewer() {
-	Notify::PeerUpdateViewer(
-		Notify::PeerUpdate::Flag::ChannelAmIn
-	) | rpl::map([](const Notify::PeerUpdate &update) {
+	session().changes().peerUpdates(
+		PeerUpdate::Flag::ChannelAmIn
+	) | rpl::map([](const PeerUpdate &update) {
 		return update.peer->asChannel();
-	}) | rpl::filter([](ChannelData *channel) {
-		return (channel != nullptr)
-			&& !(channel->amIn());
 	}) | rpl::start_with_next([=](not_null<ChannelData*> channel) {
-//		channel->clearFeed(); // #feed
-		if (const auto history = historyLoaded(channel->id)) {
-			history->removeJoinedMessage();
-			history->updateChatListExistence();
-			history->updateChatListSortPosition();
+		if (channel->amIn()) {
+			channel->clearInvitePeek();
+		} else {
+//			channel->clearFeed(); // #feed
+			if (const auto history = historyLoaded(channel->id)) {
+				history->removeJoinedMessage();
+				history->updateChatListExistence();
+				history->updateChatListSortPosition();
+			}
 		}
 	}, _lifetime);
 }
 
 void Session::setupPeerNameViewer() {
-	Notify::PeerUpdateViewer(
-		Notify::PeerUpdate::Flag::NameChanged
-	) | rpl::start_with_next([=](const Notify::PeerUpdate &update) {
+	session().changes().realtimeNameUpdates(
+	) | rpl::start_with_next([=](const NameUpdate &update) {
 		const auto peer = update.peer;
-		const auto &oldLetters = update.oldNameFirstLetters;
+		const auto &oldLetters = update.oldFirstLetters;
 		_contactsNoChatsList.peerNameChanged(peer, oldLetters);
 		_contactsList.peerNameChanged(peer, oldLetters);
 	}, _lifetime);
 }
 
 void Session::setupUserIsContactViewer() {
-	Notify::PeerUpdateViewer(
-		Notify::PeerUpdate::Flag::UserIsContact
-	) | rpl::filter([=](const Notify::PeerUpdate &update) {
-		return update.peer->isUser();
-	}) | rpl::start_with_next([=](const Notify::PeerUpdate &update) {
-		const auto user = update.peer->asUser();
-		if (user->loadedStatus != PeerData::FullLoaded) {
+	session().changes().peerUpdates(
+		PeerUpdate::Flag::IsContact
+	) | rpl::map([](const PeerUpdate &update) {
+		return update.peer->asUser();
+	}) | rpl::start_with_next([=](not_null<UserData*> user) {
+		const auto i = _contactViews.find(peerToUser(user->id));
+		if (i != _contactViews.end()) {
+			for (const auto view : i->second) {
+				requestViewResize(view);
+			}
+		}
+		if (!user->isFullLoaded()) {
 			LOG(("API Error: "
 				"userIsContactChanged() called for a not loaded user!"));
 			return;
 		}
 		if (user->isContact()) {
-			const auto history = user->owner().history(user->id);
+			const auto history = this->history(user->id);
 			_contactsList.addByName(history);
 			if (!history->inChatList()) {
 				_contactsNoChatsList.addByName(history);
 			}
-		} else if (const auto history = user->owner().historyLoaded(user)) {
+		} else if (const auto history = historyLoaded(user)) {
 			_contactsNoChatsList.del(history);
 			_contactsList.del(history);
 		}
 	}, _lifetime);
 }
 
-Session::~Session() {
-	// Optimization: clear notifications before destroying items.
-	_session->notifications().clearAllFast();
-
-	clear();
-	Images::ClearRemote();
-}
+Session::~Session() = default;
 
 template <typename Method>
 void Session::enumerateItemViews(
@@ -1107,6 +1271,15 @@ void Session::notifyPhotoLayoutChanged(not_null<const PhotoData*> photo) {
 	}
 }
 
+void Session::requestPhotoViewRepaint(not_null<const PhotoData*> photo) {
+	const auto i = _photoItems.find(photo);
+	if (i != end(_photoItems)) {
+		for (const auto item : i->second) {
+			requestItemRepaint(item);
+		}
+	}
+}
+
 void Session::notifyDocumentLayoutChanged(
 		not_null<const DocumentData*> document) {
 	const auto i = _documentItems.find(document);
@@ -1134,37 +1307,45 @@ void Session::requestDocumentViewRepaint(
 	}
 }
 
-std::shared_ptr<::Media::Streaming::Reader> Session::documentStreamedReader(
-		not_null<DocumentData*> document,
-		FileOrigin origin,
-		bool forceRemoteLoader) {
-	const auto i = _streamedReaders.find(document);
-	if (i != end(_streamedReaders)) {
-		if (auto result = i->second.lock()) {
-			if (!forceRemoteLoader || result->isRemoteLoader()) {
-				return result;
-			}
-		}
-	}
-	auto loader = document->createStreamingLoader(origin, forceRemoteLoader);
-	if (!loader) {
-		return nullptr;
-	}
-	auto result = std::make_shared<::Media::Streaming::Reader>(
-		&cacheBigFile(),
-		std::move(loader));
-	if (!PruneDestroyedAndSet(_streamedReaders, document, result)) {
-		_streamedReaders.emplace_or_assign(document, result);
-	}
-	return result;
-}
-
 void Session::requestPollViewRepaint(not_null<const PollData*> poll) {
 	if (const auto i = _pollViews.find(poll); i != _pollViews.end()) {
 		for (const auto view : i->second) {
 			requestViewResize(view);
 		}
 	}
+}
+
+void Session::documentLoadProgress(not_null<DocumentData*> document) {
+	requestDocumentViewRepaint(document);
+	session().documentUpdated.notify(document, true);
+
+	if (document->isAudioFile()) {
+		::Media::Player::instance()->documentLoadProgress(document);
+	}
+}
+
+void Session::documentLoadDone(not_null<DocumentData*> document) {
+	notifyDocumentLayoutChanged(document);
+}
+
+void Session::documentLoadFail(
+		not_null<DocumentData*> document,
+		bool started) {
+	notifyDocumentLayoutChanged(document);
+}
+
+void Session::photoLoadProgress(not_null<PhotoData*> photo) {
+	requestPhotoViewRepaint(photo);
+}
+
+void Session::photoLoadDone(not_null<PhotoData*> photo) {
+	notifyPhotoLayoutChanged(photo);
+}
+
+void Session::photoLoadFail(
+		not_null<PhotoData*> photo,
+		bool started) {
+	notifyPhotoLayoutChanged(photo);
 }
 
 void Session::markMediaRead(not_null<const DocumentData*> document) {
@@ -1223,7 +1404,7 @@ void Session::notifyItemIdChange(IdChange event) {
 	};
 	enumerateItemViews(item, refreshViewDataId);
 	if (const auto group = groups().find(item)) {
-		const auto leader = group->items.back();
+		const auto leader = group->items.front();
 		if (leader != item) {
 			enumerateItemViews(leader, refreshViewDataId);
 		}
@@ -1236,9 +1417,23 @@ rpl::producer<Session::IdChange> Session::itemIdChanged() const {
 
 void Session::requestItemRepaint(not_null<const HistoryItem*> item) {
 	_itemRepaintRequest.fire_copy(item);
-	enumerateItemViews(item, [&](not_null<const ViewElement*> view) {
-		requestViewRepaint(view);
-	});
+	auto repaintGroupLeader = false;
+	auto repaintView = [&](not_null<const ViewElement*> view) {
+		if (view->isHiddenByGroup()) {
+			repaintGroupLeader = true;
+		} else {
+			requestViewRepaint(view);
+		}
+	};
+	enumerateItemViews(item, repaintView);
+	if (repaintGroupLeader) {
+		if (const auto group = groups().find(item)) {
+			const auto leader = group->items.front();
+			if (leader != item) {
+				enumerateItemViews(leader, repaintView);
+			}
+		}
+	}
 }
 
 rpl::producer<not_null<const HistoryItem*>> Session::itemRepaintRequest() const {
@@ -1276,7 +1471,8 @@ rpl::producer<not_null<ViewElement*>> Session::viewResizeRequest() const {
 
 void Session::requestItemViewRefresh(not_null<HistoryItem*> item) {
 	if (const auto view = item->mainView()) {
-		view->setPendingResize();
+		notifyHistoryChangeDelayed(item->history());
+		view->refreshInBlock();
 	}
 	_itemViewRefreshRequest.fire_copy(item);
 }
@@ -1314,6 +1510,14 @@ rpl::producer<not_null<HistoryItem*>> Session::animationPlayInlineRequest() cons
 
 rpl::producer<not_null<const HistoryItem*>> Session::itemRemoved() const {
 	return _itemRemoved.events();
+}
+
+rpl::producer<not_null<const HistoryItem*>> Session::itemRemoved(
+		FullMsgId itemId) const {
+	return itemRemoved(
+	) | rpl::filter([=](not_null<const HistoryItem*> item) {
+		return (itemId == item->fullId());
+	});
 }
 
 void Session::notifyViewRemoved(not_null<const ViewElement*> view) {
@@ -1355,6 +1559,14 @@ void Session::sendHistoryChangeNotifications() {
 	}
 }
 
+void Session::notifyPinnedDialogsOrderUpdated() {
+	_pinnedDialogsOrderUpdated.fire({});
+}
+
+rpl::producer<> Session::pinnedDialogsOrderUpdated() const {
+	return _pinnedDialogsOrderUpdated.events();
+}
+
 void Session::registerHeavyViewPart(not_null<ViewElement*> view) {
 	_heavyViewParts.emplace(view);
 }
@@ -1368,9 +1580,10 @@ void Session::unloadHeavyViewParts(
 	if (_heavyViewParts.empty()) {
 		return;
 	}
-	const auto remove = ranges::count(_heavyViewParts, delegate, [](not_null<ViewElement*> element) {
-		return element->delegate();
-	});
+	const auto remove = ranges::count(
+		_heavyViewParts,
+		delegate,
+		[](not_null<ViewElement*> element) { return element->delegate(); });
 	if (remove == _heavyViewParts.size()) {
 		for (const auto view : base::take(_heavyViewParts)) {
 			view->unloadHeavyPart();
@@ -1449,47 +1662,6 @@ rpl::producer<not_null<UserData*>> Session::megagroupParticipantAdded(
 	});
 }
 
-void Session::notifyStickersUpdated() {
-	_stickersUpdated.fire({});
-}
-
-rpl::producer<> Session::stickersUpdated() const {
-	return _stickersUpdated.events();
-}
-
-void Session::notifyRecentStickersUpdated() {
-	_recentStickersUpdated.fire({});
-}
-
-rpl::producer<> Session::recentStickersUpdated() const {
-	return _recentStickersUpdated.events();
-}
-
-void Session::notifySavedGifsUpdated() {
-	_savedGifsUpdated.fire({});
-}
-
-rpl::producer<> Session::savedGifsUpdated() const {
-	return _savedGifsUpdated.events();
-}
-
-void Session::notifyPinnedDialogsOrderUpdated() {
-	_pinnedDialogsOrderUpdated.fire({});
-}
-
-rpl::producer<> Session::pinnedDialogsOrderUpdated() const {
-	return _pinnedDialogsOrderUpdated.events();
-}
-
-void Session::userIsContactUpdated(not_null<UserData*> user) {
-	const auto i = _contactViews.find(peerToUser(user->id));
-	if (i != _contactViews.end()) {
-		for (const auto view : i->second) {
-			requestViewResize(view);
-		}
-	}
-}
-
 HistoryItemsList Session::idsToItems(
 		const MessageIdsList &ids) const {
 	return ranges::view::all(
@@ -1519,11 +1691,16 @@ MessageIdsList Session::itemOrItsGroup(not_null<HistoryItem*> item) const {
 	return { 1, item->fullId() };
 }
 
-void Session::setChatPinned(const Dialogs::Key &key, bool pinned) {
+void Session::setChatPinned(
+		const Dialogs::Key &key,
+		FilterId filterId,
+		bool pinned) {
 	Expects(key.entry()->folderKnown());
 
-	const auto list = chatsList(key.entry()->folder())->pinned();
-	list->setPinned(key, pinned);
+	const auto list = filterId
+		? chatsFilters().chatsList(filterId)
+		: chatsList(key.entry()->folder());
+	list->pinned()->setPinned(key, pinned);
 	notifyPinnedDialogsOrderUpdated();
 }
 
@@ -1571,7 +1748,7 @@ void Session::applyDialogs(
 		});
 	}
 	if (requestFolder && count) {
-		requestFolder->setCloudChatsListSize(*count);
+		requestFolder->chatsList()->setCloudListSize(*count);
 	}
 }
 
@@ -1583,17 +1760,17 @@ void Session::applyDialog(
 		return;
 	}
 
-	const auto history = session().data().history(peerId);
+	const auto history = this->history(peerId);
 	history->applyDialog(requestFolder, data);
 	setPinnedFromDialog(history, data.is_pinned());
 
 	if (const auto from = history->peer->migrateFrom()) {
-		if (const auto historyFrom = from->owner().historyLoaded(from)) {
-			App::main()->removeDialog(historyFrom);
+		if (const auto historyFrom = historyLoaded(from)) {
+			removeChatListEntry(historyFrom);
 		}
 	} else if (const auto to = history->peer->migrateTo()) {
 		if (to->amIn()) {
-			App::main()->removeDialog(history);
+			removeChatListEntry(history);
 		}
 	}
 }
@@ -1609,19 +1786,39 @@ void Session::applyDialog(
 	setPinnedFromDialog(folder, data.is_pinned());
 }
 
-int Session::pinnedChatsCount(Data::Folder *folder) const {
-	return pinnedChatsOrder(folder).size();
+int Session::pinnedChatsCount(
+		Data::Folder *folder,
+		FilterId filterId) const {
+	if (!filterId) {
+		return pinnedChatsOrder(folder, filterId).size();
+	}
+	const auto &list = chatsFilters().list();
+	const auto i = ranges::find(list, filterId, &Data::ChatFilter::id);
+	return (i != end(list)) ? i->pinned().size() : 0;
 }
 
-int Session::pinnedChatsLimit(Data::Folder *folder) const {
-	return folder
-		? Global::PinnedDialogsInFolderMax()
-		: Global::PinnedDialogsCountMax();
+int Session::pinnedChatsLimit(
+		Data::Folder *folder,
+		FilterId filterId) const {
+	if (!filterId) {
+		return folder
+			? session().serverConfig().pinnedDialogsInFolderMax.current()
+			: session().serverConfig().pinnedDialogsCountMax.current();
+	}
+	const auto &list = chatsFilters().list();
+	const auto i = ranges::find(list, filterId, &Data::ChatFilter::id);
+	const auto pinned = (i != end(list)) ? i->pinned().size() : 0;
+	const auto already = (i != end(list)) ? i->always().size() : 0;
+	return Data::ChatFilter::kPinnedLimit + pinned - already;
 }
 
 const std::vector<Dialogs::Key> &Session::pinnedChatsOrder(
-		Data::Folder *folder) const {
-	return chatsList(folder)->pinned()->order();
+		Data::Folder *folder,
+		FilterId filterId) const {
+	const auto list = filterId
+		? chatsFilters().chatsList(filterId)
+		: chatsList(folder);
+	return list->pinned()->order();
 }
 
 void Session::clearPinnedChats(Data::Folder *folder) {
@@ -1629,77 +1826,60 @@ void Session::clearPinnedChats(Data::Folder *folder) {
 }
 
 void Session::reorderTwoPinnedChats(
+		FilterId filterId,
 		const Dialogs::Key &key1,
 		const Dialogs::Key &key2) {
 	Expects(key1.entry()->folderKnown() && key2.entry()->folderKnown());
-	Expects(key1.entry()->folder() == key2.entry()->folder());
+	Expects(filterId || (key1.entry()->folder() == key2.entry()->folder()));
 
-	chatsList(key1.entry()->folder())->pinned()->reorder(key1, key2);
+	const auto list = filterId
+		? chatsFilters().chatsList(filterId)
+		: chatsList(key1.entry()->folder());
+	list->pinned()->reorder(key1, key2);
 	notifyPinnedDialogsOrderUpdated();
 }
 
 bool Session::checkEntitiesAndViewsUpdate(const MTPDmessage &data) {
-	const auto peer = [&] {
-		const auto result = peerFromMTP(data.vto_id());
-		if (const auto fromId = data.vfrom_id()) {
-			if (result == session().userPeerId()) {
-				return peerFromUser(*fromId);
-			}
-		}
-		return result;
-	}();
-	if (const auto existing = message(peerToChannel(peer), data.vid().v)) {
-		existing->updateSentContent({
-			qs(data.vmessage()),
-			Api::EntitiesFromMTP(data.ventities().value_or_empty())
-		}, data.vmedia());
-		existing->updateReplyMarkup(data.vreply_markup());
-		existing->updateForwardedInfo(data.vfwd_from());
-		existing->setViewsCount(data.vviews().value_or(-1));
-		existing->indexAsNewItem();
-		existing->contributeToSlowmode(data.vdate().v);
-		requestItemTextRefresh(existing);
-		if (existing->mainView()) {
-			checkSavedGif(existing);
-			return true;
-		}
+	const auto peer = peerFromMTP(data.vpeer_id());
+	const auto existing = message(peerToChannel(peer), data.vid().v);
+	if (!existing) {
 		return false;
 	}
-	return false;
-}
-
-void Session::addSavedGif(not_null<DocumentData*> document) {
-	const auto index = _savedGifs.indexOf(document);
-	if (!index) {
-		return;
+	existing->updateSentContent({
+		qs(data.vmessage()),
+		Api::EntitiesFromMTP(
+			&session(),
+			data.ventities().value_or_empty())
+	}, data.vmedia());
+	existing->updateReplyMarkup(data.vreply_markup());
+	existing->updateForwardedInfo(data.vfwd_from());
+	existing->setViewsCount(data.vviews().value_or(-1));
+	if (const auto replies = data.vreplies()) {
+		existing->setReplies(*replies);
+	} else {
+		existing->clearReplies();
 	}
-	if (index > 0) {
-		_savedGifs.remove(index);
+	existing->setForwardsCount(data.vforwards().value_or(-1));
+	if (const auto reply = data.vreply_to()) {
+		reply->match([&](const MTPDmessageReplyHeader &data) {
+			existing->setReplyToTop(
+				data.vreply_to_top_id().value_or(
+					data.vreply_to_msg_id().v));
+		});
 	}
-	_savedGifs.push_front(document);
-	if (_savedGifs.size() > Global::SavedGifsLimit()) {
-		_savedGifs.pop_back();
+	existing->setPostAuthor(data.vpost_author().value_or_empty());
+	existing->indexAsNewItem();
+	existing->contributeToSlowmode(data.vdate().v);
+	requestItemTextRefresh(existing);
+	updateDependentMessages(existing);
+	const auto result = (existing->mainView() != nullptr);
+	if (result) {
+		stickers().checkSavedGif(existing);
 	}
-	Local::writeSavedGifs();
-
-	notifySavedGifsUpdated();
-	setLastSavedGifsUpdate(0);
-	session().api().updateStickers();
-}
-
-void Session::checkSavedGif(not_null<HistoryItem*> item) {
-	if (item->Has<HistoryMessageForwarded>()
-		|| (!item->out()
-			&& item->history()->peer != session().user())) {
-		return;
-	}
-	if (const auto media = item->media()) {
-		if (const auto document = media->document()) {
-			if (document->isGifv()) {
-				addSavedGif(document);
-			}
-		}
-	}
+	session().changes().messageUpdated(
+		existing,
+		Data::MessageUpdate::Flag::NewMaybeAdded);
+	return result;
 }
 
 void Session::updateEditedMessage(const MTPMessage &data) {
@@ -1707,15 +1887,7 @@ void Session::updateEditedMessage(const MTPMessage &data) {
 			-> HistoryItem* {
 		return nullptr;
 	}, [&](const auto &data) {
-		const auto peer = [&] {
-			const auto result = peerFromMTP(data.vto_id());
-			if (const auto fromId = data.vfrom_id()) {
-				if (result == session().userPeerId()) {
-					return peerFromUser(*fromId);
-				}
-			}
-			return result;
-		}();
+		const auto peer = peerFromMTP(data.vpeer_id());
 		return message(peerToChannel(peer), data.vid().v);
 	});
 	if (!existing) {
@@ -1776,18 +1948,15 @@ auto Session::messagesListForInsert(ChannelId channelId)
 		: &_channelMessages[channelId];
 }
 
-HistoryItem *Session::registerMessage(std::unique_ptr<HistoryItem> item) {
-	Expects(item != nullptr);
-
-	const auto result = item.get();
-	const auto list = messagesListForInsert(result->channelId());
-	const auto i = list->find(result->id);
+void Session::registerMessage(not_null<HistoryItem*> item) {
+	const auto list = messagesListForInsert(item->channelId());
+	const auto itemId = item->id;
+	const auto i = list->find(itemId);
 	if (i != list->end()) {
 		LOG(("App Error: Trying to re-registerMessage()."));
 		i->second->destroy();
 	}
-	list->emplace(result->id, std::move(item));
-	return result;
+	list->emplace(itemId, item);
 }
 
 void Session::processMessagesDeleted(
@@ -1806,7 +1975,7 @@ void Session::processMessagesDeleted(
 		const auto i = list ? list->find(messageId.v) : Messages::iterator();
 		if (list && i != list->end()) {
 			const auto history = i->second->history();
-			destroyMessage(i->second.get());
+			i->second->destroy();
 			if (!history->chatListMessageKnown()) {
 				historiesToCheck.emplace(history);
 			}
@@ -1832,32 +2001,15 @@ void Session::removeDependencyMessage(not_null<HistoryItem*> item) {
 	}
 }
 
-void Session::destroyMessage(not_null<HistoryItem*> item) {
-	Expects(item->isHistoryEntry() || !item->mainView());
-
+void Session::unregisterMessage(not_null<HistoryItem*> item) {
 	const auto peerId = item->history()->peer->id;
-	if (item->isHistoryEntry()) {
-		// All this must be done for all items manually in History::clear()!
-		item->eraseFromUnreadMentions();
-		if (IsServerMsgId(item->id)) {
-			if (const auto types = item->sharedMediaTypes()) {
-				session().storage().remove(Storage::SharedMediaRemoveOne(
-					peerId,
-					types,
-					item->id));
-			}
-		} else {
-			session().api().cancelLocalItem(item);
-		}
-		item->history()->itemRemoved(item);
-	}
 	_itemRemoved.fire_copy(item);
+	session().changes().messageUpdated(
+		item,
+		Data::MessageUpdate::Flag::Destroyed);
 	groups().unregisterMessage(item);
 	removeDependencyMessage(item);
-	session().notifications().clearFromItem(item);
-
-	const auto list = messagesListForInsert(peerToChannel(peerId));
-	list->erase(item->id);
+	messagesListForInsert(peerToChannel(peerId))->erase(item->id);
 }
 
 MsgId Session::nextLocalMessageId() {
@@ -1897,9 +2049,9 @@ void Session::updateDependentMessages(not_null<HistoryItem*> item) {
 			dependent->updateDependencyItem();
 		}
 	}
-	if (App::main()) {
-		App::main()->itemEdited(item);
-	}
+	session().changes().messageUpdated(
+		item,
+		Data::MessageUpdate::Flag::Edited);
 }
 
 void Session::registerDependentMessage(
@@ -1973,16 +2125,16 @@ void Session::updateNotifySettingsLocal(not_null<PeerData*> peer) {
 	if (history && history->changeMute(muted)) {
 		// Notification already sent.
 	} else {
-		Notify::peerUpdatedDelayed(
+		session().changes().peerUpdated(
 			peer,
-			Notify::PeerUpdate::Flag::NotificationsEnabled);
+			PeerUpdate::Flag::Notifications);
 	}
 
 	if (muted) {
 		_mutedPeers.emplace(peer);
 		unmuteByFinishedDelayed(changesIn);
 		if (history) {
-			_session->notifications().clearIncomingFromHistory(history);
+			Core::App().notifications().clearIncomingFromHistory(history);
 		}
 	} else {
 		_mutedPeers.erase(peer);
@@ -2052,6 +2204,15 @@ void Session::updateSendActionAnimation(
 	_sendActionAnimationUpdate.fire(std::move(update));
 }
 
+auto Session::speakingAnimationUpdated() const
+-> rpl::producer<not_null<History*>> {
+	return _speakingAnimationUpdate.events();
+}
+
+void Session::updateSpeakingAnimation(not_null<History*> history) {
+	_speakingAnimationUpdate.fire_copy(history);
+}
+
 int Session::unreadBadge() const {
 	return computeUnreadBadge(_chatsList.unreadState());
 }
@@ -2068,7 +2229,7 @@ int Session::unreadBadgeIgnoreOne(const Dialogs::Key &key) const {
 }
 
 bool Session::unreadBadgeMutedIgnoreOne(const Dialogs::Key &key) const {
-	if (!_session->settings().includeMutedCounter()) {
+	if (!Core::App().settings().includeMutedCounter()) {
 		return false;
 	}
 	const auto remove = (key && key.entry()->inChatList())
@@ -2079,56 +2240,36 @@ bool Session::unreadBadgeMutedIgnoreOne(const Dialogs::Key &key) const {
 
 int Session::unreadOnlyMutedBadge() const {
 	const auto state = _chatsList.unreadState();
-	return _session->settings().countUnreadMessages()
+	return Core::App().settings().countUnreadMessages()
 		? state.messagesMuted
 		: state.chatsMuted;
 }
 
+rpl::producer<> Session::unreadBadgeChanges() const {
+	return _unreadBadgeChanges.events();
+}
+
+void Session::notifyUnreadBadgeChanged() {
+	_unreadBadgeChanges.fire({});
+}
+
 int Session::computeUnreadBadge(const Dialogs::UnreadState &state) const {
-	const auto all = _session->settings().includeMutedCounter();
+	const auto all = Core::App().settings().includeMutedCounter();
 	return std::max(state.marks - (all ? 0 : state.marksMuted), 0)
-		+ (_session->settings().countUnreadMessages()
+		+ (Core::App().settings().countUnreadMessages()
 			? std::max(state.messages - (all ? 0 : state.messagesMuted), 0)
 			: std::max(state.chats - (all ? 0 : state.chatsMuted), 0));
 }
 
 bool Session::computeUnreadBadgeMuted(
 		const Dialogs::UnreadState &state) const {
-	if (!_session->settings().includeMutedCounter()) {
+	if (!Core::App().settings().includeMutedCounter()) {
 		return false;
 	}
 	return (state.marksMuted >= state.marks)
-		&& (_session->settings().countUnreadMessages()
+		&& (Core::App().settings().countUnreadMessages()
 			? (state.messagesMuted >= state.messages)
 			: (state.chatsMuted >= state.chats));
-}
-
-void Session::unreadStateChanged(
-		const Dialogs::Key &key,
-		const Dialogs::UnreadState &wasState) {
-	Expects(key.entry()->folderKnown());
-	Expects(key.entry()->inChatList());
-
-	const auto nowState = key.entry()->chatListUnreadState();
-	if (const auto folder = key.entry()->folder()) {
-		folder->unreadStateChanged(key, wasState, nowState);
-	} else {
-		_chatsList.unreadStateChanged(wasState, nowState);
-	}
-	Notify::unreadCounterUpdated();
-}
-
-void Session::unreadEntryChanged(const Dialogs::Key &key, bool added) {
-	Expects(key.entry()->folderKnown());
-
-	const auto state = key.entry()->chatListUnreadState();
-	if (!state.empty()) {
-		if (const auto folder = key.entry()->folder()) {
-			folder->unreadEntryChanged(key, state, added);
-		} else {
-			_chatsList.unreadEntryChanged(state, added);
-		}
-	}
 }
 
 void Session::selfDestructIn(not_null<HistoryItem*> item, crl::time delay) {
@@ -2208,11 +2349,13 @@ not_null<PhotoData*> Session::processPhoto(
 	const auto image = [&](const QByteArray &levels) {
 		const auto i = find(levels);
 		return (i == thumbs.end())
-			? ImagePtr()
-			: Images::Create(base::duplicate(i->second), "JPG");
+			? ImageWithLocation()
+			: Images::FromImageInMemory(
+				i->second.image,
+				"JPG",
+				i->second.bytes);
 	};
-	const auto thumbnailInline = image(InlineLevels);
-	const auto thumbnailSmall = image(SmallLevels);
+	const auto small = image(SmallLevels);
 	const auto thumbnail = image(ThumbnailLevels);
 	const auto large = image(LargeLevels);
 	return data.match([&](const MTPDphoto &data) {
@@ -2223,10 +2366,12 @@ not_null<PhotoData*> Session::processPhoto(
 			data.vdate().v,
 			data.vdc_id().v,
 			data.is_has_stickers(),
-			thumbnailInline,
-			thumbnailSmall,
+			QByteArray(),
+			small,
 			thumbnail,
-			large);
+			large,
+			ImageWithLocation{},
+			crl::time(0));
 	}, [&](const MTPDphotoEmpty &data) {
 		return photo(data.vid().v);
 	});
@@ -2238,11 +2383,13 @@ not_null<PhotoData*> Session::photo(
 		const QByteArray &fileReference,
 		TimeId date,
 		int32 dc,
-		bool hasSticker,
-		const ImagePtr &thumbnailInline,
-		const ImagePtr &thumbnailSmall,
-		const ImagePtr &thumbnail,
-		const ImagePtr &large) {
+		bool hasStickers,
+		const QByteArray &inlineThumbnailBytes,
+		const ImageWithLocation &small,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &large,
+		const ImageWithLocation &video,
+		crl::time videoStartTime) {
 	const auto result = photo(id);
 	photoApplyFields(
 		result,
@@ -2250,11 +2397,13 @@ not_null<PhotoData*> Session::photo(
 		fileReference,
 		date,
 		dc,
-		hasSticker,
-		thumbnailInline,
-		thumbnailSmall,
+		hasStickers,
+		inlineThumbnailBytes,
+		small,
 		thumbnail,
-		large);
+		large,
+		video,
+		videoStartTime);
 	return result;
 }
 
@@ -2264,7 +2413,8 @@ void Session::photoConvert(
 	const auto id = data.match([](const auto &data) {
 		return data.vid().v;
 	});
-	if (original->id != id) {
+	const auto idChanged = (original->id != id);
+	if (idChanged) {
 		auto i = _photos.find(id);
 		if (i == _photos.end()) {
 			const auto j = _photos.find(original->id);
@@ -2286,40 +2436,24 @@ void Session::photoConvert(
 
 PhotoData *Session::photoFromWeb(
 		const MTPWebDocument &data,
-		ImagePtr thumbnail,
-		bool willBecomeNormal) {
-	const auto large = Images::Create(data);
-	const auto thumbnailInline = ImagePtr();
-	if (large->isNull()) {
+		const ImageLocation &thumbnailLocation) {
+	const auto large = Images::FromWebDocument(data);
+	if (!large.valid()) {
 		return nullptr;
 	}
-	auto thumbnailSmall = large;
-	if (willBecomeNormal) {
-		const auto width = large->width();
-		const auto height = large->height();
-
-		auto thumbsize = shrinkToKeepAspect(width, height, 100, 100);
-		thumbnailSmall = Images::Create(thumbsize.width(), thumbsize.height());
-
-		if (thumbnail->isNull()) {
-			auto mediumsize = shrinkToKeepAspect(width, height, 320, 320);
-			thumbnail = Images::Create(mediumsize.width(), mediumsize.height());
-		}
-	} else if (thumbnail->isNull()) {
-		thumbnail = large;
-	}
-
 	return photo(
-		rand_value<PhotoId>(),
+		openssl::RandomValue<PhotoId>(),
 		uint64(0),
 		QByteArray(),
 		base::unixtime::now(),
 		0,
 		false,
-		thumbnailInline,
-		thumbnailSmall,
-		thumbnail,
-		large);
+		QByteArray(),
+		ImageWithLocation{},
+		ImageWithLocation{ .location = thumbnailLocation },
+		ImageWithLocation{ .location = large },
+		ImageWithLocation{},
+		crl::time(0));
 }
 
 void Session::photoApplyFields(
@@ -2334,6 +2468,21 @@ void Session::photoApplyFields(
 		not_null<PhotoData*> photo,
 		const MTPDphoto &data) {
 	const auto &sizes = data.vsizes().v;
+	const auto progressive = [&] {
+		const auto kInvalidIndex = sizes.size();
+		const auto area = [&](const MTPPhotoSize &size) {
+			return size.match([](const MTPDphotoSizeProgressive &data) {
+				return data.vw().v * data.vh().v;
+			}, [](const auto &) {
+				return 0;
+			});
+		};
+		const auto found = ranges::max_element(sizes, std::less<>(), area);
+		return (found == sizes.end()
+			|| found->type() != mtpc_photoSizeProgressive)
+			? sizes.end()
+			: found;
+	}();
 	const auto find = [&](const QByteArray &levels) {
 		const auto kInvalidIndex = int(levels.size());
 		const auto level = [&](const MTPPhotoSize &size) {
@@ -2353,13 +2502,31 @@ void Session::photoApplyFields(
 	};
 	const auto image = [&](const QByteArray &levels) {
 		const auto i = find(levels);
-		return (i == sizes.end()) ? ImagePtr() : Images::Create(data, *i);
+		return (i == sizes.end())
+			? ImageWithLocation()
+			: Images::FromPhotoSize(_session, data, *i);
 	};
-	const auto thumbnailInline = image(InlineLevels);
-	const auto thumbnailSmall = image(SmallLevels);
-	const auto thumbnail = image(ThumbnailLevels);
-	const auto large = image(LargeLevels);
-	if (thumbnailSmall && thumbnail && large) {
+	const auto findVideoSize = [&]() -> std::optional<MTPVideoSize> {
+		const auto sizes = data.vvideo_sizes();
+		if (!sizes || sizes->v.isEmpty()) {
+			return std::nullopt;
+		}
+		const auto area = [](const MTPVideoSize &size) {
+			return size.match([](const MTPDvideoSize &data) {
+				return data.vw().v * data.vh().v;
+			});
+		};
+		return *ranges::max_element(
+			sizes->v,
+			std::greater<>(),
+			area);
+	};
+	const auto useProgressive = (progressive != sizes.end());
+	const auto large = useProgressive
+		? Images::FromPhotoSize(_session, data, *progressive)
+		: image(LargeLevels);
+	if (large.location.valid()) {
+		const auto video = findVideoSize();
 		photoApplyFields(
 			photo,
 			data.vaccess_hash().v,
@@ -2367,10 +2534,21 @@ void Session::photoApplyFields(
 			data.vdate().v,
 			data.vdc_id().v,
 			data.is_has_stickers(),
-			thumbnailInline,
-			thumbnailSmall,
-			thumbnail,
-			large);
+			FindPhotoInlineThumbnail(data),
+			(useProgressive
+				? ImageWithLocation()
+				: image(SmallLevels)),
+			(useProgressive
+				? Images::FromProgressiveSize(_session, *progressive, 1)
+				: image(ThumbnailLevels)),
+			large,
+			(video
+				? Images::FromVideoSize(_session, data, *video)
+				: ImageWithLocation()),
+			(video
+				? VideoStartTime(
+					*video->match([](const auto &data) { return &data; }))
+				: 0));
 	}
 }
 
@@ -2380,22 +2558,26 @@ void Session::photoApplyFields(
 		const QByteArray &fileReference,
 		TimeId date,
 		int32 dc,
-		bool hasSticker,
-		const ImagePtr &thumbnailInline,
-		const ImagePtr &thumbnailSmall,
-		const ImagePtr &thumbnail,
-		const ImagePtr &large) {
+		bool hasStickers,
+		const QByteArray &inlineThumbnailBytes,
+		const ImageWithLocation &small,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &large,
+		const ImageWithLocation &video,
+		crl::time videoStartTime) {
 	if (!date) {
 		return;
 	}
 	photo->setRemoteLocation(dc, access, fileReference);
 	photo->date = date;
-	photo->hasSticker = hasSticker;
+	photo->setHasAttachedStickers(hasStickers);
 	photo->updateImages(
-		thumbnailInline,
-		thumbnailSmall,
+		inlineThumbnailBytes,
+		small,
 		thumbnail,
-		large);
+		large,
+		video,
+		videoStartTime);
 }
 
 not_null<DocumentData*> Session::document(DocumentId id) {
@@ -2409,14 +2591,11 @@ not_null<DocumentData*> Session::document(DocumentId id) {
 }
 
 not_null<DocumentData*> Session::processDocument(const MTPDocument &data) {
-	switch (data.type()) {
-	case mtpc_document:
-		return processDocument(data.c_document());
-
-	case mtpc_documentEmpty:
-		return document(data.c_documentEmpty().vid().v);
-	}
-	Unexpected("Type in Session::document().");
+	return data.match([&](const MTPDdocument &data) {
+		return processDocument(data);
+	}, [&](const MTPDdocumentEmpty &data) {
+		return document(data.vid().v);
+	});
 }
 
 not_null<DocumentData*> Session::processDocument(const MTPDdocument &data) {
@@ -2427,33 +2606,23 @@ not_null<DocumentData*> Session::processDocument(const MTPDdocument &data) {
 
 not_null<DocumentData*> Session::processDocument(
 		const MTPdocument &data,
-		QImage &&thumb) {
-	switch (data.type()) {
-	case mtpc_documentEmpty:
-		return document(data.c_documentEmpty().vid().v);
-
-	case mtpc_document: {
-		const auto &fields = data.c_document();
-		const auto mime = qs(fields.vmime_type());
-		const auto format = (mime == qstr("image/webp")
-			|| mime == qstr("application/x-tgsticker"))
-			? "WEBP"
-			: "JPG";
+		const ImageWithLocation &thumbnail) {
+	return data.match([&](const MTPDdocument &data) {
 		return document(
-			fields.vid().v,
-			fields.vaccess_hash().v,
-			fields.vfile_reference().v,
-			fields.vdate().v,
-			fields.vattributes().v,
-			mime,
-			ImagePtr(),
-			Images::Create(std::move(thumb), format),
-			fields.vdc_id().v,
-			fields.vsize().v,
-			StorageImageLocation());
-	} break;
-	}
-	Unexpected("Type in Session::document() with thumb.");
+			data.vid().v,
+			data.vaccess_hash().v,
+			data.vfile_reference().v,
+			data.vdate().v,
+			data.vattributes().v,
+			qs(data.vmime_type()),
+			QByteArray(),
+			thumbnail,
+			ImageWithLocation(),
+			data.vdc_id().v,
+			data.vsize().v);
+	}, [&](const MTPDdocumentEmpty &data) {
+		return document(data.vid().v);
+	});
 }
 
 not_null<DocumentData*> Session::document(
@@ -2463,11 +2632,11 @@ not_null<DocumentData*> Session::document(
 		TimeId date,
 		const QVector<MTPDocumentAttribute> &attributes,
 		const QString &mime,
-		const ImagePtr &thumbnailInline,
-		const ImagePtr &thumbnail,
+		const QByteArray &inlineThumbnailBytes,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &videoThumbnail,
 		int32 dc,
-		int32 size,
-		const StorageImageLocation &thumbLocation) {
+		int32 size) {
 	const auto result = document(id);
 	documentApplyFields(
 		result,
@@ -2476,28 +2645,23 @@ not_null<DocumentData*> Session::document(
 		date,
 		attributes,
 		mime,
-		thumbnailInline,
+		inlineThumbnailBytes,
 		thumbnail,
+		videoThumbnail,
 		dc,
-		size,
-		thumbLocation);
+		size);
 	return result;
 }
 
 void Session::documentConvert(
 		not_null<DocumentData*> original,
 		const MTPDocument &data) {
-	const auto id = [&] {
-		switch (data.type()) {
-		case mtpc_document: return data.c_document().vid().v;
-		case mtpc_documentEmpty: return data.c_documentEmpty().vid().v;
-		}
-		Unexpected("Type in Session::documentConvert().");
-	}();
-	const auto oldKey = original->mediaKey();
+	const auto id = data.match([](const auto &data) {
+		return data.vid().v;
+	});
 	const auto oldCacheKey = original->cacheKey();
+	const auto oldGoodKey = original->goodThumbnailCacheKey();
 	const auto idChanged = (original->id != id);
-	const auto sentSticker = idChanged && (original->sticker() != nullptr);
 	if (idChanged) {
 		auto i = _documents.find(id);
 		if (i == _documents.end()) {
@@ -2519,41 +2683,41 @@ void Session::documentConvert(
 	documentApplyFields(original, data);
 	if (idChanged) {
 		cache().moveIfEmpty(oldCacheKey, original->cacheKey());
-		if (savedGifs().indexOf(original) >= 0) {
-			Local::writeSavedGifs();
+		cache().moveIfEmpty(oldGoodKey, original->goodThumbnailCacheKey());
+		if (stickers().savedGifs().indexOf(original) >= 0) {
+			_session->local().writeSavedGifs();
 		}
 	}
 }
 
 DocumentData *Session::documentFromWeb(
 		const MTPWebDocument &data,
-		ImagePtr thumb) {
-	switch (data.type()) {
-	case mtpc_webDocument:
-		return documentFromWeb(data.c_webDocument(), thumb);
-
-	case mtpc_webDocumentNoProxy:
-		return documentFromWeb(data.c_webDocumentNoProxy(), thumb);
-
-	}
-	Unexpected("Type in Session::documentFromWeb.");
+		const ImageLocation &thumbnailLocation,
+		const ImageLocation &videoThumbnailLocation) {
+	return data.match([&](const auto &data) {
+		return documentFromWeb(
+			data,
+			thumbnailLocation,
+			videoThumbnailLocation);
+	});
 }
 
 DocumentData *Session::documentFromWeb(
 		const MTPDwebDocument &data,
-		ImagePtr thumb) {
+		const ImageLocation &thumbnailLocation,
+		const ImageLocation &videoThumbnailLocation) {
 	const auto result = document(
-		rand_value<DocumentId>(),
+		openssl::RandomValue<DocumentId>(),
 		uint64(0),
 		QByteArray(),
 		base::unixtime::now(),
 		data.vattributes().v,
 		data.vmime_type().v,
-		ImagePtr(),
-		thumb,
-		MTP::maindc(),
-		int32(0), // data.vsize().v
-		StorageImageLocation());
+		QByteArray(),
+		ImageWithLocation{ .location = thumbnailLocation },
+		ImageWithLocation{ .location = videoThumbnailLocation },
+		session().mainDcId(),
+		int32(0)); // data.vsize().v
 	result->setWebLocation(WebFileLocation(
 		data.vurl().v,
 		data.vaccess_hash().v));
@@ -2562,19 +2726,20 @@ DocumentData *Session::documentFromWeb(
 
 DocumentData *Session::documentFromWeb(
 		const MTPDwebDocumentNoProxy &data,
-		ImagePtr thumb) {
+		const ImageLocation &thumbnailLocation,
+		const ImageLocation &videoThumbnailLocation) {
 	const auto result = document(
-		rand_value<DocumentId>(),
+		openssl::RandomValue<DocumentId>(),
 		uint64(0),
 		QByteArray(),
 		base::unixtime::now(),
 		data.vattributes().v,
 		data.vmime_type().v,
-		ImagePtr(),
-		thumb,
-		MTP::maindc(),
-		int32(0), // data.vsize().v
-		StorageImageLocation());
+		QByteArray(),
+		ImageWithLocation{ .location = thumbnailLocation },
+		ImageWithLocation{ .location = videoThumbnailLocation },
+		session().mainDcId(),
+		int32(0)); // data.vsize().v
 	result->setContentUrl(qs(data.vurl()));
 	return result;
 }
@@ -2590,9 +2755,16 @@ void Session::documentApplyFields(
 void Session::documentApplyFields(
 		not_null<DocumentData*> document,
 		const MTPDdocument &data) {
-	const auto thumbnailInline = FindDocumentInlineThumbnail(data);
+	const auto inlineThumbnailBytes = FindDocumentInlineThumbnail(data);
 	const auto thumbnailSize = FindDocumentThumbnail(data);
-	const auto thumbnail = Images::Create(data, thumbnailSize);
+	const auto videoThumbnailSize = FindDocumentVideoThumbnail(data);
+	const auto prepared = Images::FromPhotoSize(
+		_session,
+		data,
+		thumbnailSize);
+	const auto videoThumbnail = videoThumbnailSize
+		? Images::FromVideoSize(_session, data, *videoThumbnailSize)
+		: ImageWithLocation();
 	documentApplyFields(
 		document,
 		data.vaccess_hash().v,
@@ -2600,11 +2772,11 @@ void Session::documentApplyFields(
 		data.vdate().v,
 		data.vattributes().v,
 		qs(data.vmime_type()),
-		Images::Create(data, thumbnailInline),
-		thumbnail,
+		inlineThumbnailBytes,
+		prepared,
+		videoThumbnail,
 		data.vdc_id().v,
-		data.vsize().v,
-		thumbnail->location());
+		data.vsize().v);
 }
 
 void Session::documentApplyFields(
@@ -2614,17 +2786,20 @@ void Session::documentApplyFields(
 		TimeId date,
 		const QVector<MTPDocumentAttribute> &attributes,
 		const QString &mime,
-		const ImagePtr &thumbnailInline,
-		const ImagePtr &thumbnail,
+		const QByteArray &inlineThumbnailBytes,
+		const ImageWithLocation &thumbnail,
+		const ImageWithLocation &videoThumbnail,
 		int32 dc,
-		int32 size,
-		const StorageImageLocation &thumbLocation) {
+		int32 size) {
 	if (!date) {
 		return;
 	}
 	document->date = date;
 	document->setMimeString(mime);
-	document->updateThumbnails(thumbnailInline, thumbnail);
+	document->updateThumbnails(
+		inlineThumbnailBytes,
+		thumbnail,
+		videoThumbnail);
 	document->size = size;
 	document->setattributes(attributes);
 
@@ -2633,18 +2808,14 @@ void Session::documentApplyFields(
 	if (dc != 0 && access != 0) {
 		document->setRemoteLocation(dc, access, fileReference);
 	}
-
-	if (document->sticker()
-		&& !document->sticker()->loc.valid()
-		&& thumbLocation.valid()) {
-		document->sticker()->loc = thumbLocation;
-	}
 }
 
 not_null<WebPageData*> Session::webpage(WebPageId id) {
 	auto i = _webpages.find(id);
 	if (i == _webpages.cend()) {
-		i = _webpages.emplace(id, std::make_unique<WebPageData>(id)).first;
+		i = _webpages.emplace(
+			id,
+			std::make_unique<WebPageData>(this, id)).first;
 	}
 	return i->second.get();
 }
@@ -2657,6 +2828,7 @@ not_null<WebPageData*> Session::processWebpage(const MTPWebPage &data) {
 		const auto result = webpage(data.c_webPageEmpty().vid().v);
 		if (result->pendingTill > 0) {
 			result->pendingTill = -1; // failed
+			notifyWebPageUpdateDelayed(result);
 		}
 		return result;
 	} break;
@@ -2765,12 +2937,27 @@ void Session::webpageApplyFields(
 	const auto pendingTill = TimeId(0);
 	const auto photo = data.vphoto();
 	const auto document = data.vdocument();
-	const auto lookupThemeDocument = [&]() -> DocumentData* {
+	const auto lookupInAttribute = [&](
+			const MTPDwebPageAttributeTheme &data) -> DocumentData* {
 		if (const auto documents = data.vdocuments()) {
 			for (const auto &document : documents->v) {
 				const auto processed = processDocument(document);
 				if (processed->isTheme()) {
 					return processed;
+				}
+			}
+		}
+		return nullptr;
+	};
+	const auto lookupThemeDocument = [&]() -> DocumentData* {
+		if (const auto attributes = data.vattributes()) {
+			for (const auto &attribute : attributes->v) {
+				const auto result = attribute.match([&](
+						const MTPDwebPageAttributeTheme &data) {
+					return lookupInAttribute(data);
+				});
+				if (result) {
+					return result;
 				}
 			}
 		}
@@ -2786,7 +2973,7 @@ void Session::webpageApplyFields(
 		description,
 		photo ? processPhoto(*photo).get() : nullptr,
 		document ? processDocument(*document).get() : lookupThemeDocument(),
-		WebPageCollage(data),
+		WebPageCollage(this, data),
 		data.vduration().value_or_empty(),
 		qs(data.vauthor().value_or_empty()),
 		pendingTill);
@@ -2925,7 +3112,7 @@ void Session::gameApplyFields(
 not_null<PollData*> Session::poll(PollId id) {
 	auto i = _polls.find(id);
 	if (i == _polls.cend()) {
-		i = _polls.emplace(id, std::make_unique<PollData>(id)).first;
+		i = _polls.emplace(id, std::make_unique<PollData>(this, id)).first;
 	}
 	return i->second.get();
 }
@@ -2938,6 +3125,10 @@ not_null<PollData*> Session::processPoll(const MTPPoll &data) {
 		if (changed) {
 			notifyPollUpdateDelayed(result);
 		}
+		if (result->closeDate > 0 && !result->closed()) {
+			_pollsClosings.emplace(result->closeDate, result);
+			checkPollsClosings();
+		}
 		return result;
 	});
 }
@@ -2949,6 +3140,29 @@ not_null<PollData*> Session::processPoll(const MTPDmessageMediaPoll &data) {
 		notifyPollUpdateDelayed(result);
 	}
 	return result;
+}
+
+void Session::checkPollsClosings() {
+	const auto now = base::unixtime::now();
+	auto closest = 0;
+	for (auto i = _pollsClosings.begin(); i != _pollsClosings.end();) {
+		if (i->first <= now) {
+			if (i->second->closeByTimer()) {
+				notifyPollUpdateDelayed(i->second);
+			}
+			i = _pollsClosings.erase(i);
+		} else {
+			if (!closest) {
+				closest = i->first;
+			}
+			++i;
+		}
+	}
+	if (closest) {
+		_pollsClosingTimer.callOnce((closest - now) * crl::time(1000));
+	} else {
+		_pollsClosingTimer.cancel();
+	}
 }
 
 void Session::applyUpdate(const MTPDupdateMessagePoll &update) {
@@ -3011,13 +3225,23 @@ void Session::applyUpdate(const MTPDupdateChatDefaultBannedRights &update) {
 	}
 }
 
-not_null<LocationThumbnail*> Session::location(const LocationPoint &point) {
+not_null<Data::CloudImage*> Session::location(const LocationPoint &point) {
 	const auto i = _locations.find(point);
-	return (i != _locations.cend())
-		? i->second.get()
-		: _locations.emplace(
-			point,
-			std::make_unique<LocationThumbnail>(point)).first->second.get();
+	if (i != _locations.cend()) {
+		return i->second.get();
+	}
+	const auto location = Data::ComputeLocation(point);
+	const auto prepared = ImageWithLocation{
+		.location = ImageLocation(
+			{ location },
+			location.width,
+			location.height)
+	};
+	return _locations.emplace(
+		point,
+		std::make_unique<Data::CloudImage>(
+			_session,
+			prepared)).first->second.get();
 }
 
 void Session::registerPhotoItem(
@@ -3164,9 +3388,9 @@ void Session::registerContactItem(
 	_contactItems[contactId].insert(item);
 
 	if (contact && canShare != contact->canShareThisContact()) {
-		Notify::peerUpdatedDelayed(
+		session().changes().peerUpdated(
 			contact,
-			Notify::PeerUpdate::Flag::UserCanShareContact);
+			PeerUpdate::Flag::CanShareContact);
 	}
 
 	if (const auto i = _views.find(item); i != _views.end()) {
@@ -3196,28 +3420,52 @@ void Session::unregisterContactItem(
 	}
 
 	if (contact && canShare != contact->canShareThisContact()) {
-		Notify::peerUpdatedDelayed(
+		session().changes().peerUpdated(
 			contact,
-			Notify::PeerUpdate::Flag::UserCanShareContact);
+			PeerUpdate::Flag::CanShareContact);
 	}
 }
 
-void Session::registerAutoplayAnimation(
-		not_null<::Media::Clip::Reader*> reader,
-		not_null<ViewElement*> view) {
-	_autoplayAnimations.emplace(reader, view);
+void Session::registerCallItem(not_null<HistoryItem*> item) {
+	_callItems.emplace(item);
 }
 
-void Session::unregisterAutoplayAnimation(
-		not_null<::Media::Clip::Reader*> reader) {
-	_autoplayAnimations.remove(reader);
+void Session::unregisterCallItem(not_null<HistoryItem*> item) {
+	_callItems.erase(item);
 }
 
-void Session::stopAutoplayAnimations() {
-	for (const auto [reader, view] : base::take(_autoplayAnimations)) {
+void Session::destroyAllCallItems() {
+	while (!_callItems.empty()) {
+		(*_callItems.begin())->destroy();
+	}
+}
+
+void Session::documentMessageRemoved(not_null<DocumentData*> document) {
+	if (_documentItems.find(document) != _documentItems.end()) {
+		return;
+	}
+	if (document->loading()) {
+		document->cancel();
+	}
+}
+
+void Session::checkPlayingAnimations() {
+	auto check = base::flat_set<not_null<ViewElement*>>();
+	for (const auto view : _heavyViewParts) {
 		if (const auto media = view->media()) {
-			media->stopAnimation();
+			if (const auto document = media->getDocument()) {
+				if (document->isAnimation() || document->isVideoFile()) {
+					check.emplace(view);
+				}
+			} else if (const auto photo = media->getPhoto()) {
+				if (photo->hasVideo()) {
+					check.emplace(view);
+				}
+			}
 		}
+	}
+	for (const auto view : check) {
+		view->media()->checkAnimation();
 	}
 }
 
@@ -3284,6 +3532,7 @@ void Session::notifyPollUpdateDelayed(not_null<PollData*> poll) {
 
 void Session::sendWebPageGamePollNotifications() {
 	for (const auto page : base::take(_webpagesUpdated)) {
+		_webpageUpdates.fire_copy(page);
 		const auto i = _webpageViews.find(page);
 		if (i != _webpageViews.end()) {
 			for (const auto view : i->second) {
@@ -3307,11 +3556,25 @@ void Session::sendWebPageGamePollNotifications() {
 	}
 }
 
+rpl::producer<not_null<WebPageData*>> Session::webPageUpdates() const {
+	return _webpageUpdates.events();
+}
+
+void Session::channelDifferenceTooLong(not_null<ChannelData*> channel) {
+	_channelDifferenceTooLong.fire_copy(channel);
+}
+
+rpl::producer<not_null<ChannelData*>> Session::channelDifferenceTooLong() const {
+	return _channelDifferenceTooLong.events();
+}
+
 void Session::registerItemView(not_null<ViewElement*> view) {
 	_views[view->data()].push_back(view);
 }
 
 void Session::unregisterItemView(not_null<ViewElement*> view) {
+	Expects(!_heavyViewParts.contains(view));
+
 	const auto i = _views.find(view->data());
 	if (i != end(_views)) {
 		auto &list = i->second;
@@ -3394,50 +3657,97 @@ not_null<Dialogs::IndexedList*> Session::contactsNoChatsList() {
 	return &_contactsNoChatsList;
 }
 
-auto Session::refreshChatListEntry(Dialogs::Key key)
--> RefreshChatListEntryResult {
+void Session::refreshChatListEntry(Dialogs::Key key) {
+	Expects(key.entry()->folderKnown());
+
 	using namespace Dialogs;
 
 	const auto entry = key.entry();
-	auto result = RefreshChatListEntryResult();
-	result.changed = !entry->inChatList();
-	if (result.changed) {
-		const auto mainRow = entry->addToChatList(Mode::All);
+	const auto history = key.history();
+	const auto mainList = chatsList(entry->folder());
+	auto event = ChatListEntryRefresh{ .key = key };
+	const auto creating = event.existenceChanged = !entry->inChatList();
+	if (event.existenceChanged) {
+		const auto mainRow = entry->addToChatList(0, mainList);
 		_contactsNoChatsList.del(key, mainRow);
 	} else {
-		result.moved = entry->adjustByPosInChatList(Mode::All);
+		event.moved = entry->adjustByPosInChatList(0, mainList);
 	}
-	if (Global::DialogsModeEnabled()) {
-		if (entry->toImportant()) {
-			result.importantChanged = !entry->inChatList(Mode::Important);
-			if (result.importantChanged) {
-				entry->addToChatList(Mode::Important);
+	if (event) {
+		_chatListEntryRefreshes.fire(std::move(event));
+	}
+	if (!history) {
+		return;
+	}
+	for (const auto &filter : _chatsFilters->list()) {
+		const auto id = filter.id();
+		const auto filterList = chatsFilters().chatsList(id);
+		auto event = ChatListEntryRefresh{ .key = key, .filterId = id };
+		if (filter.contains(history)) {
+			event.existenceChanged = !entry->inChatList(id);
+			if (event.existenceChanged) {
+				entry->addToChatList(id, filterList);
 			} else {
-				result.importantMoved = entry->adjustByPosInChatList(
-					Mode::Important);
+				event.moved = entry->adjustByPosInChatList(id, filterList);
 			}
-		} else if (entry->inChatList(Mode::Important)) {
-			entry->removeFromChatList(Mode::Important);
-			result.importantChanged = true;
+		} else if (entry->inChatList(id)) {
+			entry->removeFromChatList(id, filterList);
+			event.existenceChanged = true;
+		}
+		if (event) {
+			_chatListEntryRefreshes.fire(std::move(event));
 		}
 	}
-	return result;
+
+	if (creating) {
+		if (const auto from = history->peer->migrateFrom()) {
+			if (const auto migrated = historyLoaded(from)) {
+				removeChatListEntry(migrated);
+			}
+		}
+	}
 }
 
 void Session::removeChatListEntry(Dialogs::Key key) {
 	using namespace Dialogs;
 
 	const auto entry = key.entry();
-	entry->removeFromChatList(Mode::All);
-	if (Global::DialogsModeEnabled()) {
-		entry->removeFromChatList(Mode::Important);
+	if (!entry->inChatList()) {
+		return;
 	}
+	Assert(entry->folderKnown());
+	for (const auto &filter : _chatsFilters->list()) {
+		const auto id = filter.id();
+		if (entry->inChatList(id)) {
+			entry->removeFromChatList(id, chatsFilters().chatsList(id));
+			_chatListEntryRefreshes.fire(ChatListEntryRefresh{
+				.key = key,
+				.filterId = id,
+				.existenceChanged = true
+			});
+		}
+	}
+	const auto mainList = chatsList(entry->folder());
+	entry->removeFromChatList(0, mainList);
+	_chatListEntryRefreshes.fire(ChatListEntryRefresh{
+		.key = key,
+		.existenceChanged = true
+	});
 	if (_contactsList.contains(key)) {
 		if (!_contactsNoChatsList.contains(key)) {
 			_contactsNoChatsList.addByName(key);
 		}
 	}
+	if (const auto history = key.history()) {
+		Core::App().notifications().clearFromHistory(history);
+	}
 }
+
+auto Session::chatListEntryRefreshes() const
+-> rpl::producer<ChatListEntryRefresh> {
+	return _chatListEntryRefreshes.events();
+}
+
 
 void Session::dialogsRowReplaced(DialogsRowReplacement replacement) {
 	_dialogsRowReplacements.fire(std::move(replacement));
@@ -3527,6 +3837,19 @@ void Session::updateNotifySettings(
 		std::optional<int> muteForSeconds,
 		std::optional<bool> silentPosts) {
 	if (peer->notifyChange(muteForSeconds, silentPosts)) {
+		updateNotifySettingsLocal(peer);
+		_session->api().updateNotifySettingsDelayed(peer);
+	}
+}
+
+void Session::resetNotifySettingsToDefault(not_null<PeerData*> peer) {
+	const auto empty = MTP_peerNotifySettings(
+		MTP_flags(0),
+		MTPBool(),
+		MTPBool(),
+		MTPint(),
+		MTPstring());
+	if (peer->notifyChange(empty)) {
 		updateNotifySettingsLocal(peer);
 		_session->api().updateNotifySettingsDelayed(peer);
 	}
@@ -3636,20 +3959,12 @@ void Session::serviceNotification(
 	}
 	const auto history = this->history(PeerData::kServiceNotificationsId);
 	if (!history->folderKnown()) {
-		_session->api().requestDialogEntry(history, [=] {
+		histories().requestDialogEntry(history, [=] {
 			insertCheckedServiceNotification(message, media, date);
 		});
 	} else {
 		insertCheckedServiceNotification(message, media, date);
 	}
-}
-
-void Session::checkNewAuthorization() {
-	_newAuthorizationChecks.fire({});
-}
-
-rpl::producer<> Session::newAuthorizationChecks() const {
-	return _newAuthorizationChecks.events();
 }
 
 void Session::insertCheckedServiceNotification(
@@ -3668,18 +3983,20 @@ void Session::insertCheckedServiceNotification(
 			MTP_message(
 				MTP_flags(flags),
 				MTP_int(nextLocalMessageId()),
-				MTP_int(peerToUser(PeerData::kServiceNotificationsId)),
-				MTP_peerUser(MTP_int(_session->userId())),
+				peerToMTP(PeerData::kServiceNotificationsId),
+				peerToMTP(PeerData::kServiceNotificationsId),
 				MTPMessageFwdHeader(),
-				MTPint(),
-				MTPint(),
+				MTPint(), // via_bot_id
+				MTPMessageReplyHeader(),
 				MTP_int(date),
 				MTP_string(sending.text),
 				media,
 				MTPReplyMarkup(),
-				Api::EntitiesToMTP(sending.entities),
-				MTPint(),
-				MTPint(),
+				Api::EntitiesToMTP(&session(), sending.entities),
+				MTPint(), // views
+				MTPint(), // forwards
+				MTPMessageReplies(),
+				MTPint(), // edit_date
 				MTPstring(),
 				MTPlong(),
 				//MTPMessageReactions(),
@@ -3698,30 +4015,34 @@ MessageIdsList Session::takeMimeForwardIds() {
 	return std::move(_mimeForwardIds);
 }
 
-void Session::setProxyPromoted(PeerData *promoted) {
-	if (_proxyPromoted != promoted) {
-		if (const auto history = historyLoaded(_proxyPromoted)) {
-			history->cacheProxyPromoted(false);
-		}
-		const auto old = std::exchange(_proxyPromoted, promoted);
-		if (_proxyPromoted) {
-			const auto history = this->history(_proxyPromoted);
-			history->cacheProxyPromoted(true);
-			history->requestChatListMessage();
-			Notify::peerUpdatedDelayed(
-				_proxyPromoted,
-				Notify::PeerUpdate::Flag::ChannelPromotedChanged);
-		}
-		if (old) {
-			Notify::peerUpdatedDelayed(
-				old,
-				Notify::PeerUpdate::Flag::ChannelPromotedChanged);
+void Session::setTopPromoted(
+		History *promoted,
+		const QString &type,
+		const QString &message) {
+	const auto changed = (_topPromoted != promoted);
+	if (!changed
+		&& (!promoted || promoted->topPromotionMessage() == message)) {
+		return;
+	}
+	if (changed) {
+		if (_topPromoted) {
+			_topPromoted->cacheTopPromotion(false, QString(), QString());
 		}
 	}
-}
-
-PeerData *Session::proxyPromoted() const {
-	return _proxyPromoted;
+	const auto old = std::exchange(_topPromoted, promoted);
+	if (_topPromoted) {
+		histories().requestDialogEntry(_topPromoted);
+		_topPromoted->cacheTopPromotion(true, type, message);
+		_topPromoted->requestChatListMessage();
+		session().changes().historyUpdated(
+			_topPromoted,
+			HistoryUpdate::Flag::TopPromoted);
+	}
+	if (changed && old) {
+		session().changes().historyUpdated(
+			old,
+			HistoryUpdate::Flag::TopPromoted);
+	}
 }
 
 bool Session::updateWallpapers(const MTPaccount_WallPapers &data) {
@@ -3741,27 +4062,16 @@ void Session::setWallpapers(const QVector<MTPWallPaper> &data, int32 hash) {
 
 	_wallpapers.push_back(Data::Legacy1DefaultWallPaper());
 	_wallpapers.back().setLocalImageAsThumbnail(std::make_shared<Image>(
-		std::make_unique<Images::LocalFileSource>(
-			qsl(":/gui/art/bg_initial.jpg"),
-			QByteArray(),
-			"JPG")));
+		u":/gui/art/bg_initial.jpg"_q));
 	for (const auto &paper : data) {
-		paper.match([&](const MTPDwallPaper &paper) {
-			if (const auto parsed = Data::WallPaper::Create(paper)) {
-				_wallpapers.push_back(*parsed);
-			}
-		});
+		if (const auto parsed = Data::WallPaper::Create(&session(), paper)) {
+			_wallpapers.push_back(*parsed);
+		}
 	}
-	const auto defaultFound = ranges::find_if(
-		_wallpapers,
-		Data::IsDefaultWallPaper);
-	if (defaultFound == end(_wallpapers)) {
+	if (ranges::none_of(_wallpapers, Data::IsDefaultWallPaper)) {
 		_wallpapers.push_back(Data::DefaultWallPaper());
 		_wallpapers.back().setLocalImageAsThumbnail(std::make_shared<Image>(
-			std::make_unique<Images::LocalFileSource>(
-				qsl(":/gui/arg/bg.jpg"),
-				QByteArray(),
-				"JPG")));
+			u":/gui/arg/bg.jpg"_q));
 	}
 }
 
@@ -3781,10 +4091,10 @@ int32 Session::wallpapersHash() const {
 }
 
 void Session::clearLocalStorage() {
-	clear();
-
 	_cache->close();
 	_cache->clear();
+	_bigFileCache->close();
+	_bigFileCache->clear();
 }
 
 } // namespace Data

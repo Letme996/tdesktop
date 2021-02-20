@@ -20,7 +20,6 @@ namespace Settings {
 using Type = Section::SettingsType;
 
 struct Tag;
-class InnerWidget;
 
 class Memento final : public ContentMemento {
 public:
@@ -53,6 +52,7 @@ public:
 	Widget(
 		QWidget *parent,
 		not_null<Controller*> controller);
+	~Widget();
 
 	not_null<UserData*> self() const;
 
@@ -72,7 +72,7 @@ private:
 	void saveState(not_null<Memento*> memento);
 	void restoreState(not_null<Memento*> memento);
 
-	std::unique_ptr<ContentMemento> doCreateMemento() override;
+	std::shared_ptr<ContentMemento> doCreateMemento() override;
 
 	not_null<UserData*> _self;
 	Type _type = Type();

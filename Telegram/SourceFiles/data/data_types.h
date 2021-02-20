@@ -10,27 +10,31 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "base/value_ordering.h"
 #include "ui/text/text.h" // For QFIXED_MAX
 
+class HistoryItem;
+using HistoryItemsList = std::vector<not_null<HistoryItem*>>;
+
+class StorageImageLocation;
+class WebFileLocation;
+struct GeoPointLocation;
+
 namespace Storage {
 namespace Cache {
 struct Key;
 } // namespace Cache
 } // namespace Storage
 
-class HistoryItem;
-using HistoryItemsList = std::vector<not_null<HistoryItem*>>;
-
 namespace Ui {
 class InputField;
 } // namespace Ui
+
+namespace Main {
+class Session;
+} // namespace Main
 
 namespace Images {
 enum class Option;
 using Options = base::flags<Option>;
 } // namespace Images
-
-class StorageImageLocation;
-class WebFileLocation;
-struct GeoPointLocation;
 
 namespace Data {
 
@@ -55,33 +59,6 @@ constexpr auto kVideoMessageCacheTag = uint8(0x04);
 constexpr auto kAnimationCacheTag = uint8(0x05);
 
 struct FileOrigin;
-
-class ReplyPreview {
-public:
-	ReplyPreview();
-	ReplyPreview(ReplyPreview &&other);
-	ReplyPreview &operator=(ReplyPreview &&other);
-	~ReplyPreview();
-
-	void prepare(
-		not_null<Image*> image,
-		FileOrigin origin,
-		Images::Options options);
-	void clear();
-
-	[[nodiscard]] Image *image() const;
-	[[nodiscard]] bool good() const;
-	[[nodiscard]] bool empty() const;
-
-	[[nodiscard]] explicit operator bool() const {
-		return !empty();
-	}
-
-private:
-	struct Data;
-	std::unique_ptr<Data> _data;
-
-};
 
 } // namespace Data
 
@@ -128,16 +105,18 @@ using UserId = int32;
 using ChatId = int32;
 using ChannelId = int32;
 using FolderId = int32;
+using FilterId = int32;
 
 constexpr auto NoChannel = ChannelId(0);
 
 using PeerId = uint64;
 
 constexpr auto PeerIdMask         = PeerId(0xFFFFFFFFULL);
-constexpr auto PeerIdTypeMask     = PeerId(0x300000000ULL);
+constexpr auto PeerIdTypeMask     = PeerId(0xF00000000ULL);
 constexpr auto PeerIdUserShift    = PeerId(0x000000000ULL);
 constexpr auto PeerIdChatShift    = PeerId(0x100000000ULL);
 constexpr auto PeerIdChannelShift = PeerId(0x200000000ULL);
+constexpr auto PeerIdFakeShift    = PeerId(0xF00000000ULL);
 
 inline constexpr bool peerIsUser(const PeerId &id) {
 	return (id & PeerIdTypeMask) == PeerIdUserShift;
@@ -308,7 +287,11 @@ using PollId = uint64;
 using WallPaperId = uint64;
 constexpr auto CancelledWebPageId = WebPageId(0xFFFFFFFFFFFFFFFFULL);
 
-using PreparedPhotoThumbs = base::flat_map<char, QImage>;
+struct PreparedPhotoThumb {
+	QImage image;
+	QByteArray bytes;
+};
+using PreparedPhotoThumbs = base::flat_map<char, PreparedPhotoThumb>;
 
 // [0] == -1 -- counting, [0] == -2 -- could not count
 using VoiceWaveform = QVector<signed char>;
@@ -340,6 +323,9 @@ enum DocumentType {
 	RoundVideoDocument = 6,
 	WallPaperDocument = 7,
 };
+
+inline constexpr auto kStickerSideSize = 512;
+[[nodiscard]] bool GoodStickerDimensions(int width, int height);
 
 using MediaKey = QPair<uint64, uint64>;
 
@@ -443,45 +429,30 @@ inline bool operator==(
 		&& (a.scroll == b.scroll);
 }
 
-struct SendAction {
-	enum class Type {
-		Typing,
-		RecordVideo,
-		UploadVideo,
-		RecordVoice,
-		UploadVoice,
-		RecordRound,
-		UploadRound,
-		UploadPhoto,
-		UploadFile,
-		ChooseLocation,
-		ChooseContact,
-		PlayGame,
-	};
-	SendAction(
-		Type type,
-		crl::time until,
-		int progress = 0)
-	: type(type)
-	, until(until)
-	, progress(progress) {
-	}
-	Type type = Type::Typing;
-	crl::time until = 0;
-	int progress = 0;
-
-};
+inline bool operator!=(
+		const MessageCursor &a,
+		const MessageCursor &b) {
+	return !(a == b);
+}
 
 class FileClickHandler : public LeftButtonClickHandler {
 public:
-	FileClickHandler(FullMsgId context) : _context(context) {
+	FileClickHandler(
+		not_null<Main::Session*> session,
+		FullMsgId context)
+	: _session(session)
+	, _context(context) {
+	}
+
+	[[nodiscard]] Main::Session &session() const {
+		return *_session;
 	}
 
 	void setMessageId(FullMsgId context) {
 		_context = context;
 	}
 
-	FullMsgId context() const {
+	[[nodiscard]] FullMsgId context() const {
 		return _context;
 	}
 
@@ -489,6 +460,7 @@ protected:
 	HistoryItem *getActionItem() const;
 
 private:
+	const not_null<Main::Session*> _session;
 	FullMsgId _context;
 
 };
